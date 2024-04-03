@@ -2,7 +2,7 @@
 
 ## What is this?
 
-Currently, not working. However, it aims to be a working interface and agent to play The Legend of Zelda (1987). 
+This repo aims to be a working interface and neural network agent to play The Legend of Zelda (1987).
 The interface is built using [Nintaco](https://nintaco.com/).
 
 ## What are the goals?

@@ -1,2 +1,8 @@
 LEGACY/*
 Nintaco/*
+.conda/*
+legacy_bot.py
+__pycache__/addresses.cpython-310.pyc
+__pycache__/backend.cpython-310.pyc
+__pycache__/nintaco.cpython-310.pyc
+__pycache__/zelda_interface.cpython-310.pyc
