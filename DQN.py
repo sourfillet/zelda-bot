@@ -1,60 +1,51 @@
 import numpy as np
+import tensorflow as tf
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Conv2D, Flatten
+from tensorflow.keras.layers import Dense, Flatten
 from tensorflow.keras.optimizers import Adam
-from collections import deque
-import random
+from tensorflow.keras.layers import Conv2D
 
-# Constants
-SCREEN_WIDTH = 256
-SCREEN_HEIGHT = 240
-NUM_ACTIONS = 8
-MEMORY_SIZE = 10000
-BATCH_SIZE = 32
-GAMMA = 0.95
-EPSILON_MAX = 1.0
-EPSILON_MIN = 0.01
-EPSILON_DECAY = 0.995
+class DQNAgent:
+    def __init__(self, state_size, action_size, learning_rate, discount_factor, epsilon, epsilon_decay, epsilon_min):
+        self.state_size = state_size
+        self.action_size = action_size
+        self.learning_rate = learning_rate
+        self.discount_factor = discount_factor
+        self.epsilon = epsilon
+        self.epsilon_decay = epsilon_decay
+        self.epsilon_min = epsilon_min
+        self.model = self._build_model()
 
-class DQN:
-    def __init__(self):
-        self.memory = deque(maxlen=MEMORY_SIZE)
-        self.epsilon = EPSILON_MAX
-        self.model = self.build_model()
-
-    def build_model(self):
+    def _build_model(self):
         model = Sequential()
-        model.add(Conv2D(32, (8, 8), strides=(4, 4), activation='relu', input_shape=(SCREEN_HEIGHT, SCREEN_WIDTH, 1)))
+        model.add(Conv2D(32, (8, 8), strides=(4, 4), activation='relu', input_shape=(84, 84, 1)))
         model.add(Conv2D(64, (4, 4), strides=(2, 2), activation='relu'))
         model.add(Conv2D(64, (3, 3), activation='relu'))
         model.add(Flatten())
         model.add(Dense(512, activation='relu'))
-        model.add(Dense(NUM_ACTIONS))
-        model.compile(loss='mse', optimizer=Adam())
+        model.add(Dense(self.action_size, activation='linear'))
+        model.compile(loss='mse', optimizer=Adam(lr=self.learning_rate))
         return model
-
-    def remember(self, state, action, reward, next_state, done):
-        self.memory.append((state, action, reward, next_state, done))
 
     def act(self, state):
         if np.random.rand() <= self.epsilon:
-            return random.randrange(NUM_ACTIONS)
-        act_values = self.model.predict(state)
-        return np.argmax(act_values[0])
+            return np.random.randint(self.action_size, size=self.action_size)
+        q_values = self.model.predict(state)
+        action_index = np.argmax(q_values[0])
+        action = np.zeros(self.action_size, dtype=int)
+        action[action_index] = 1
+        return action
 
-    def replay(self):
-        if len(self.memory) < BATCH_SIZE:
-            return
-        minibatch = random.sample(self.memory, BATCH_SIZE)
-        states, targets = [], []
-        for state, action, reward, next_state, done in minibatch:
-            target = reward
-            if not done:
-                target = reward + GAMMA * np.amax(self.model.predict(next_state)[0])
-            target_f = self.model.predict(state)
-            target_f[0][action] = target
-            states.append(state[0])
-            targets.append(target_f[0])
-        self.model.fit(np.array(states), np.array(targets), epochs=1, verbose=0)
-        if self.epsilon > EPSILON_MIN:
-            self.epsilon *= EPSILON_DECAY
+    def train(self, state, action, reward, next_state, done):
+        target = reward
+        if not done:
+            target = (reward + self.discount_factor * np.amax(self.model.predict(next_state)[0]))
+        target_f = self.model.predict(state)
+        target_f[0][action] = target
+        self.model.fit(state, target_f, epochs=1, verbose=0)
+
+    def update_epsilon(self):
+        self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
+
+    def save(self, filepath):
+        self.model.save(filepath)

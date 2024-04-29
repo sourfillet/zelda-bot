@@ -3,3 +3,8 @@ Nintaco/*
 .conda/*
 legacy_bot.py
 __pycache__/*
+wip/*
+tensortest.py
+test.py
+zelda-gymretro.py
+backend.py
