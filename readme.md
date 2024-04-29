@@ -18,9 +18,7 @@ The first goal is to get the agent to figure out how to clear a dungeon. When an
 **NO!** You have to provide the game in .nes format yourself. I will not provide the .nes file in any way, shape, or form.
 
 ## How do I run this?
-You will need to install gym-retro:
-pip install gym==0.21.0
-pip install  
+Will fill out this section later.
 
 ## Sources
 
