@@ -53,7 +53,7 @@ Once gym-retro is set up and the game is integrated, you can train the models by
 
     python -m main
 
-Configuration settings can be set either in modelargs.json or on the command line by specifying --arg and following it with an appropriate value. If no arguments are passed on the command line, the code will default to modelargs.json. The arguments are listed below:
+Configuration settings can be set either in modelargs.json or on the command line by specifying --arg and following it with an appropriate value. The arguments are listed below:
 
 * **state**: determines which save state to load the game in. Under the integration folder, there are multiple states. The default is **gamestart**, which starts the player at the beginning of the game. Each **level state** (levelx.state) starts at dungeon x and contains only the minimum of what is needed to either get to or beat that dungeon. For both configuration and command line arguments, only use the name of the state, without the file extension.
 * **model**: currently set to DQN, as the other models were written with an older version of this code and still need to be updated.
