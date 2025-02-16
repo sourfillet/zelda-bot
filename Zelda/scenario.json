@@ -1,0 +1,19 @@
+{
+    "done": {
+        "variables": {
+            "Triforce Pieces": {
+                "op": "1"
+            }
+        }
+    },
+    "reward": {
+        "variables": {
+            "Enemies Killed": {
+                "reward": 1.0
+            },
+            "Enemies Killed Current Room": {
+                "reward": 1.0
+            }
+        }
+    }
+}

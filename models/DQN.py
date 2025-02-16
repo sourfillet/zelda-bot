@@ -17,6 +17,9 @@ class DQNAgent:
         self.model = self._build_model()
 
     def _build_model(self):
+        """
+        Build the DQN model.
+        """
         model = Sequential()
         model.add(Conv2D(32, (8, 8), strides=(4, 4), activation='relu', input_shape=(84, 84, 1)))
         model.add(Conv2D(64, (4, 4), strides=(2, 2), activation='relu'))
@@ -24,12 +27,19 @@ class DQNAgent:
         model.add(Flatten())
         model.add(Dense(512, activation='relu'))
         model.add(Dense(self.action_size, activation='linear'))
-        model.compile(loss='mse', optimizer=Adam(lr=self.learning_rate))
+        model.compile(loss='mean_squared_error', optimizer=Adam(learning_rate=self.learning_rate))
         return model
 
     def act(self, state):
+        """
+        Choose an action based on the epsilon-greedy policy
+        """
         if np.random.rand() <= self.epsilon:
-            return np.random.randint(self.action_size, size=self.action_size)
+            # Choose a random index and convert it to a one-hot vector
+            action_index = np.random.randint(self.action_size)
+            action = np.zeros(self.action_size, dtype=int)
+            action[action_index] = 1
+            return action
         q_values = self.model.predict(state)
         action_index = np.argmax(q_values[0])
         action = np.zeros(self.action_size, dtype=int)
@@ -37,6 +47,9 @@ class DQNAgent:
         return action
 
     def train(self, state, action, reward, next_state, done):
+        """
+        Train the model
+        """
         target = reward
         if not done:
             target = (reward + self.discount_factor * np.amax(self.model.predict(next_state)[0]))
@@ -45,7 +58,13 @@ class DQNAgent:
         self.model.fit(state, target_f, epochs=1, verbose=0)
 
     def update_epsilon(self):
+        """
+        Update epsilon
+        """
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
 
     def save(self, filepath):
+        """
+        Save the model to a file
+        """
         self.model.save(filepath)

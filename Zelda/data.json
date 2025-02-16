@@ -1,0 +1,144 @@
+{
+  "info": {
+    "Arrow": {
+      "address": 1625,
+      "type": "|u1"
+    },
+    "Backend Frame Count": {
+      "address": 21,
+      "type": "|u1"
+    },
+    "Backend Mode": {
+      "address": 18,
+      "type": "|u1"
+    },
+    "Bombs": {
+      "address": 1624,
+      "type": "|u1"
+    },
+    "Boomerang": {
+      "address": 1652,
+      "type": "|u1"
+    },
+    "Boomerang 2": {
+      "address": 1653,
+      "type": "|u1"
+    },
+    "Bow": {
+      "address": 1626,
+      "type": "|u1"
+    },
+    "Candle": {
+      "address": 1627,
+      "type": "|u1"
+    },
+    "Deaths": {
+      "address": 630,
+      "type": "|u1"
+    },
+    "Enemies In Current Room": {
+      "address": 846,
+      "type": "|u1"
+    },
+    "Enemies Killed": {
+      "address": 80,
+      "type": "|u1"
+    },
+    "Enemies Killed Current Room": {
+      "address": 847,
+      "type": "|u1"
+    },
+    "Flute": {
+      "address": 1628,
+      "type": "|u1"
+    },
+    "Food": {
+      "address": 1629,
+      "type": "|u1"
+    },
+    "Hearts": {
+      "address": 1648,
+      "type": "|u1"
+    },
+    "Keys": {
+      "address": 1646,
+      "type": "|u1"
+    },
+    "Ladder": {
+      "address": 1635,
+      "type": "|u1"
+    },
+    "Letter": {
+      "address": 1638,
+      "type": "|u1"
+    },
+    "Level": {
+      "address": 16,
+      "type": "|u1"
+    },
+    "Link X": {
+      "address": 112,
+      "type": "|u1"
+    },
+    "Link Y": {
+      "address": 132,
+      "type": "|u1"
+    },
+    "Magic Book": {
+      "address": 1633,
+      "type": "|u1"
+    },
+    "Magical Key": {
+      "address": 1636,
+      "type": "|u1"
+    },
+    "Magical Rod": {
+      "address": 1631,
+      "type": "|u1"
+    },
+    "Map Scroll LR": {
+      "address": 253,
+      "type": "|u1"
+    },
+    "Map Scroll UD": {
+      "address": 237,
+      "type": "|u1"
+    },
+    "Potion": {
+      "address": 1630,
+      "type": "|u1"
+    },
+    "Power Bracelet": {
+      "address": 1637,
+      "type": "|u1"
+    },
+    "Raft": {
+      "address": 1632,
+      "type": "|u1"
+    },
+    "Ring": {
+      "address": 1634,
+      "type": "|u1"
+    },
+    "Room": {
+      "address": 235,
+      "type": "|u1"
+    },
+    "Rupees": {
+      "address": 1645,
+      "type": "|u1"
+    },
+    "Shield": {
+      "address": 1654,
+      "type": "|u1"
+    },
+    "Sword": {
+      "address": 1623,
+      "type": "|u1"
+    },
+    "Triforce Pieces": {
+      "address": 1649,
+      "type": "|u1"
+    }
+  }
+}

@@ -1,174 +1,206 @@
 import retro
 import random
 import numpy as np
-from DQN import DQNAgent
 import cv2
+import argparse
+import json
+import os
+import datetime
+import glob
+import tensorflow as tf
+from models.DQN import DQNAgent
+from zelda import get_actual_hearts, single_pickup_items, multi_pickup_items, get_reward, dungeon_save_states
 
-env = retro.make(game='Zelda1')
-old_info = None
-times_reset = 0
-visited_rooms = {}
-total_rewards = 0
+tf.config.run_functions_eagerly(True)
+tf.data.experimental.enable_debug_mode()
 
 def preprocess_state(state):
-    # Resize the state to a smaller size
+    """
+    Preprocess the state by resizing it to a smaller size and converting it to grayscale.
+    """
+    if isinstance(state, tuple):
+        state = state[0]
     state = cv2.resize(state, (84, 84))
-    
-    # Convert the state to grayscale
     state = cv2.cvtColor(state, cv2.COLOR_RGB2GRAY)
-    
-    # Reshape the state to match the expected input shape of the model
     state = np.reshape(state, [1, 84, 84, 1])
-    
     return state
 
-def get_actual_hearts(hearts=0):
-    partials = {
-                256:4,
-                128:3.5,
-                255:3,
-                127:2.5,
-                254:2,
-                126:1.5,
-                253:1,			
-                125:0.5,
-                0:0,
-            }
-    
-    return partials[hearts]
-
-def get_reward(info=None):
-    global old_info
-    global total_rewards
-    if info is None:
-        return 0
-
-    reward = 0
-    info['Hearts'] = get_actual_hearts(info['Hearts'])
-
-    if old_info is None:
-        old_info = info
-        return 0
-    
-    if info['Level'] != 1:
-        reward -= 100
-
-    if info['Room'] not in visited_rooms:
-        visited_rooms[info['Room']] = {}
-        reward += 10
-
-    if (info['Link X'], info['Link Y']) not in visited_rooms[info['Room']]:
-        visited_rooms[info['Room']][(info['Link X'], info['Link Y'])] = 1
-        reward += 2.5
+def load_config(config_file):
+    """
+    Load configuration parameters from a JSON file.
+    """
+    if os.path.exists(config_file):
+        with open(config_file, 'r') as f:
+            return json.load(f)
     else:
-        reward -= 1
+        print(f"Config file {config_file} not found. Using default parameters.")
+        return {}
 
-    if info['Hearts'] != old_info['Hearts']:
-        if info['Hearts'] < old_info['Hearts']:
-            reward -= old_info['Hearts'] - info['Hearts']
-        elif info['Hearts'] > old_info['Hearts']:
-            reward += info['Hearts'] - old_info['Hearts']
+def parse_arguments():
+    """
+    Parse command-line arguments and return the arguments object.
+    """
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--config', type=str, default='config.txt', help="Path to config file")
+    args, _ = parser.parse_known_args()
+
+    config_defaults = load_config(args.config)
+
+    parser = argparse.ArgumentParser(
+        description="Train a DQN agent on a retro game environment"
+    )
+    parser.add_argument('--state', type=str, default='level1', help='Name of the state to start in')
+    parser.add_argument('--model', type=str, default='DQN',
+                        help='Model to use: DQN, DDPG, DoubleDQN')
+    parser.add_argument('--game', type=str, default=config_defaults.get('game', 'Zelda'),
+                        help='Name of the game environment')
+    parser.add_argument('--num_episodes', type=int, default=config_defaults.get('num_episodes', 5),
+                        help='Number of episodes to run')
+    parser.add_argument('--learning_rate', type=float, default=config_defaults.get('learning_rate', 0.001),
+                        help='Learning rate for the agent')
+    parser.add_argument('--discount_factor', type=float, default=config_defaults.get('discount_factor', 0.99),
+                        help='Discount factor for training')
+    parser.add_argument('--epsilon', type=float, default=config_defaults.get('epsilon', 1.0),
+                        help='Initial exploration rate')
+    parser.add_argument('--epsilon_decay', type=float, default=config_defaults.get('epsilon_decay', 0.995),
+                        help='Epsilon decay rate')
+    parser.add_argument('--epsilon_min', type=float, default=config_defaults.get('epsilon_min', 0.01),
+                        help='Minimum epsilon value')
+    parser.add_argument('--max_frames', type=int, default=1000,
+                        help='Maximum number of frames per episode')
+    return parser.parse_args()
+
+def get_video_writer(episode, frame_size, fps=30):
+    """
+    Create a VideoWriter to record footage of an episode.
+    """
+    # Create the main recordings directory if it doesn't exist
+    recordings_dir = "recordings"
+    if not os.path.exists(recordings_dir):
+        os.makedirs(recordings_dir)
     
-    if info['EnemiesKilledSinceLastHit'] != old_info['EnemiesKilledSinceLastHit']:
-        if info['EnemiesKilledSinceLastHit'] > old_info['EnemiesKilledSinceLastHit']:
-            reward += info['EnemiesKilledSinceLastHit'] - old_info['EnemiesKilledSinceLastHit']
-        elif info['EnemiesKilledSinceLastHit'] < old_info['EnemiesKilledSinceLastHit']:
-            reward -= old_info['EnemiesKilledSinceLastHit'] - info['EnemiesKilledSinceLastHit']
-
-    if info['Bombs'] != old_info['Bombs']:
-        if info['Bombs'] > old_info['Bombs']:
-            reward += info['Bombs'] - old_info['Bombs']
-        elif info['Bombs'] < old_info['Bombs']:
-            reward -= old_info['Bombs'] - info['Bombs']
-
-    if info['Keys'] != old_info['Keys']:
-        if info['Keys'] > old_info['Keys']:
-            reward += info['Keys'] - old_info['Keys']
-        elif info['Keys'] < old_info['Keys']:
-            reward -= old_info['Keys'] - info['Keys']
-
-    if info['Rupees'] != old_info['Rupees']:
-        if info['Rupees'] > old_info['Rupees']:
-            reward += info['Rupees'] - old_info['Rupees']
-        elif info['Rupees'] < old_info['Rupees']:
-            reward -= old_info['Rupees'] - info['Rupees']
-
-    if info['NumDeaths'] != old_info['NumDeaths']:
-        if info['NumDeaths'] > old_info['NumDeaths']:
-            reward -= old_info['NumDeaths'] - info['NumDeaths']
-        elif info['NumDeaths'] < old_info['NumDeaths']:
-            reward += info['NumDeaths'] - old_info['NumDeaths']
-
-    if info['Boomerang'] != old_info['Boomerang']:
-        if info['Boomerang'] > old_info['Boomerang']:
-            reward += info['Boomerang'] - old_info['Boomerang']
-        elif info['Boomerang'] < old_info['Boomerang']:
-            reward -= old_info['Boomerang'] - info['Boomerang']
-
-    old_info = info
-    total_rewards += reward
-    return reward
-
-def make_move(state, old_info, epsilon):
-    if random.random() < epsilon:
-        # Take a random action
-        return env.action_space.sample()
-    else:
-        # Take the best action based on the reward function
-        best_reward = float('-inf')
-        best_action = None
-
-        for action in range(env.action_space.n):
-            _, _, done, info = env.step(action)
-            reward = get_reward(info)
-
-            if reward > best_reward:
-                best_reward = reward
-                best_action = action
-
-            if done:
-                break
-
-            env.reset()
-            env.step(state)
-
-        return best_action
+    # Create a subdirectory with a timestamp for this run
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    run_dir = os.path.join(recordings_dir, timestamp)
+    if not os.path.exists(run_dir):
+        os.makedirs(run_dir)
     
-state_size = env.observation_space.shape[0]
-action_size = env.action_space.n
-learning_rate = 0.001
-discount_factor = 0.99
-epsilon = 1.0
-epsilon_decay = 0.995
-epsilon_min = 0.01
-num_episodes = 1
+    # Set the video file path
+    video_path = os.path.join(run_dir, f"episode_{episode}.avi")
+    
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    writer = cv2.VideoWriter(video_path, fourcc, fps, frame_size)
+    return writer
 
-agent = DQNAgent(state_size, action_size, learning_rate, discount_factor, epsilon, epsilon_decay, epsilon_min)
+def integrate(state=retro.State.DEFAULT):
+    """
+    Integrate the custom Zelda environment into the Retro data set.
+    """
+    path = os.path.dirname(os.path.abspath(__file__))
+    print("Path: ", path)
+    retro.data.Integrations.add_custom_path(path)
+    print("Zelda in integrations:", "Zelda" in retro.data.list_games(inttype=retro.data.Integrations.ALL))
+    env = retro.make("Zelda", state=state, inttype=retro.data.Integrations.ALL, render_mode="rgb_array")
+    return env
 
-for episode in range(num_episodes):
-    state = env.reset()
-    state = preprocess_state(state)
-    done = False
+def save_model(agent, episode, model_dir="saved_models"):
+    """
+    Save the model to a unique file within model_dir.
+    The filename includes the agent's class name, episode number, and a timestamp.
+    """
+    if not os.path.exists(model_dir):
+        os.makedirs(model_dir)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{agent.__class__.__name__}_episode{episode}_{timestamp}.h5"
+    model_path = os.path.join(model_dir, filename)
+    agent.model.save(model_path)
+    print("Model saved at:", model_path)
+    return model_path
 
-    while not done:
-        action = agent.act(state)
-        next_state, reward, done, info = env.step(action)
+def load_model_into_agent(agent, model_dir="saved_models", learning_rate=0.001, model_file=None):
+    """
+    Load a model from model_dir (or from a specified file) and assign it to the agent.
+    If model_file is not provided, the most recent model file is loaded.
+    """
+    if model_file is None:
+        files = glob.glob(os.path.join(model_dir, "*.h5"))
+        if not files:
+            print("No model files found in", model_dir)
+            return None
+        model_file = max(files, key=os.path.getctime)
+    agent.model = tf.keras.models.load_model(model_file)
 
-        if info["Screen Scrolling"] != 0:
-            # screen is scrolling, do nothing
-            continue
+    # Recompile the model with the specified learning rate
+    agent.model.compile(loss='mean_squared_error', optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate))
+    print("Model loaded from:", model_file)
+    return model_file
 
-        reward = get_reward(info)
-        print("Rewards: " + str(reward))
-        next_state = preprocess_state(next_state)
-        agent.train(state, action, reward, next_state, done)
-        state = next_state
-        env.render()
+def main():
+    args = parse_arguments()
 
-    agent.update_epsilon()
+    print("Arguments:")
+    for arg in vars(args):
+        print(f"{arg}: {getattr(args, arg)}")
 
-    # Save the trained model
-    model_path = 'model.h5'
-    agent.save(model_path)
+    env = integrate(args.state)
+    state_shape = env.observation_space.shape  # e.g., (height, width, channels)
+    state_size = state_shape[0]
+    action_size = env.action_space.n
+    total_rewards = 0
 
-env.close()
+    # Initialize the agent
+    if args.model == 'DQN':
+        agent = DQNAgent(state_size, action_size, args.learning_rate,
+                         args.discount_factor, args.epsilon, args.epsilon_decay, args.epsilon_min)
+
+    # Train the agent
+    for episode in range(args.num_episodes):
+        # load a pre-trained model into the agent.
+        load_model_into_agent(agent, learning_rate=args.learning_rate)
+        
+        state = env.reset()
+        old_info = None
+        visited_rooms = {}
+        state = preprocess_state(state)
+        done = False
+
+        # Create a video writer for this episode.
+        frame = env.render()
+        height, width, channels = frame.shape
+        writer = get_video_writer(episode, (width, height), fps=30)
+
+        frame_count = 0  # Frame counter for this episode
+
+        while not done and frame_count < args.max_frames:
+            frame_count += 1
+
+            action = agent.act(state)
+            next_state, reward, terminated, truncated, info = env.step(action)
+            done = terminated or truncated
+
+            # Skip agent taking an action if screen is scrolling
+            if info["Map Scroll LR"] == 0 and info["Map Scroll UD"] == 255:
+                reward, old_info, visited_rooms = get_reward(visited_rooms, info, old_info, args.state)
+                print("Room: ", info['Room'])
+                print("Frame:", frame_count, " of ", args.max_frames)
+                total_rewards += reward
+                print("Total rewards:", total_rewards)
+
+                next_state = preprocess_state(next_state)
+                agent.train(state, action, reward, next_state, done)
+                state = next_state
+
+            # Capture and record the frame.
+            frame = env.render()
+            writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+
+        writer.release()
+        agent.update_epsilon()
+
+        # Save the trained model at the end of each episode.
+        save_model(agent, episode)
+
+    env.close()
+
+if __name__ == "__main__":
+    main()
