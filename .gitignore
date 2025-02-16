@@ -5,7 +5,6 @@ Zelda/test
 Zelda/monsters.state
 saved_models/*
 recordings/*
-requirements.txt
 integrate.py
 test_gym.py
 test_numpy.py
