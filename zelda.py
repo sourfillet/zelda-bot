@@ -113,7 +113,7 @@ def get_reward(visited_rooms, info=None, old_info=None, level_state="gamestart")
         visited_rooms[info['Room']][(info['Link X'], info['Link Y'])] = 1
         reward += reward_values['movement']
     else:
-        reward -= reward_values['repeat_state']
+        reward += reward_values['repeat_state']
         
     if info['Enemies Killed'] != old_info['Enemies Killed']:
         reward += (info['Enemies Killed'] - old_info['Enemies Killed']) * 10
