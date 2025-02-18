@@ -54,7 +54,7 @@ def parse_arguments():
                         help='Model to use: DQN, DDPG, DoubleDQN')
     parser.add_argument('--game', type=str, default=config_defaults.get('game', 'Zelda'),
                         help='Name of the game environment')
-    parser.add_argument('--num_episodes', type=int, default=config_defaults.get('num_episodes', 5),
+    parser.add_argument('--num_episodes', type=int, default=config_defaults.get('num_episodes', 20),
                         help='Number of episodes to run')
     parser.add_argument('--learning_rate', type=float, default=config_defaults.get('learning_rate', 0.001),
                         help='Learning rate for the agent')
@@ -164,6 +164,9 @@ def main():
         state = preprocess_state(state)
         done = False
 
+        # Initialize per-episode reward counter.
+        episode_reward = 0
+
         # Create a video writer for this episode.
         frame = env.render()
         height, width, channels = frame.shape
@@ -178,21 +181,45 @@ def main():
             next_state, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
 
-            # Skip agent taking an action if screen is scrolling
+            # Process rewards only when the map is not scrolling.
             if info["Map Scroll LR"] == 0 and info["Map Scroll UD"] == 255:
                 reward, old_info, visited_rooms = get_reward(visited_rooms, info, old_info, args.state)
-                print("Room: ", info['Room'])
-                print("Frame:", frame_count, " of ", args.max_frames)
+                print("Episode:", episode, "Frame:", frame_count, "of", args.max_frames)
+
+                if info["Room"] != 116:
+                    reward = -10
+                    done = True
                 total_rewards += reward
+                episode_reward += reward  # update reward for this episode
                 print("Total rewards:", total_rewards)
 
                 next_state = preprocess_state(next_state)
                 agent.train(state, action, reward, next_state, done)
                 state = next_state
 
-            # Capture and record the frame.
+            # Capture the frame and overlay the episode, frame count, and reward information.
             frame = env.render()
-            writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            overlay_text = f"Ep: {episode} | Frame: {frame_count} | Reward: {episode_reward}"
+
+            # Define font parameters.
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.3
+            thickness = 1
+
+            # Get the size of the text box.
+            (text_width, text_height), baseline = cv2.getTextSize(overlay_text, font, font_scale, thickness)
+
+            # Set the origin for the text.
+            x, y = 10, text_height + 5
+
+            # Draw a filled black rectangle as the background for the text.
+            cv2.rectangle(frame_bgr, (x - 5, y - text_height - 5), (x + text_width + 5, y + baseline + 5), (0, 0, 0), cv2.FILLED)
+
+            # Put the white text on top.
+            cv2.putText(frame_bgr, overlay_text, (x, y), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+
+            writer.write(frame_bgr)
 
         writer.release()
         agent.update_epsilon()
