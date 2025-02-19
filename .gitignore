@@ -8,7 +8,6 @@ recordings/*
 integrate.py
 test_gym.py
 test_numpy.py
-models/DoubleDQN.py
 models/DDPG.py
 cuda-keyring_1.0-1_all.deb
 scripts/__pycache__/gputest.cpython-38.pyc
