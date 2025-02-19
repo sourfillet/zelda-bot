@@ -6,10 +6,10 @@ from tensorflow.keras.optimizers import Adam
 import random
 from collections import deque
 
-class DQNAgent:
+class DoubleDQNAgent:
     def __init__(self, state_size, action_size, learning_rate, discount_factor, 
                  epsilon, epsilon_decay, epsilon_min):
-        self.state_size = state_size    # Not used directly; state shape comes from preprocessed images.
+        self.state_size = state_size    # Typically not used directly (input shape is defined in _build_model)
         self.action_size = action_size
         self.learning_rate = learning_rate
         self.discount_factor = discount_factor
@@ -20,7 +20,6 @@ class DQNAgent:
         # Experience Replay parameters
         self.memory = deque(maxlen=2000)
         self.batch_size = 32
-        self.train_start = 32  # Begin training only when memory has at least this many samples.
 
         # Target network update frequency (in training steps)
         self.target_update_freq = 100  # update target network every 100 training steps
@@ -33,7 +32,8 @@ class DQNAgent:
 
     def _build_model(self):
         """
-        Build the DQN model.
+        Build the Q-network model.
+        Note: If you are using (84,84,1) inputs, adjust accordingly.
         """
         model = Sequential()
         model.add(Conv2D(32, (8, 8), strides=(4, 4), activation='relu', input_shape=(84, 84, 1)))
@@ -47,7 +47,7 @@ class DQNAgent:
 
     def update_target_model(self):
         """
-        Copy weights from the main network to the target network.
+        Copy the weights from the main network to the target network.
         """
         self.target_model.set_weights(self.model.get_weights())
 
@@ -71,7 +71,8 @@ class DQNAgent:
     def train(self, state, action, reward, next_state, done):
         """
         Store the transition in memory and train the model using experience replay.
-        This method uses a mini-batch of past transitions and computes targets using the target network.
+        This method implements the Double DQN update rule:
+            y = r + gamma * Q_target(s', argmax_a Q_main(s', a))
         """
         # Convert one-hot action to index if necessary
         if isinstance(action, np.ndarray) and action.shape == (self.action_size,):
@@ -79,14 +80,14 @@ class DQNAgent:
         else:
             action_index = action
 
-        # Store transition
+        # Store transition in memory
         self.memory.append((state, action_index, reward, next_state, done))
 
-        # Only start training when enough samples are available
+        # Only start training if enough samples are available in memory
         if len(self.memory) < self.batch_size:
             return
 
-        # Sample a mini-batch from the memory
+        # Sample a mini-batch from memory
         minibatch = random.sample(self.memory, self.batch_size)
 
         # Prepare arrays for training
@@ -96,33 +97,38 @@ class DQNAgent:
         rewards = np.array([sample[2] for sample in minibatch])
         dones = np.array([sample[4] for sample in minibatch]).astype(int)
 
-        # Predict Q-values for current states and for next states (using target network)
+        # Predict Q-values for current states using the main network
         target = self.model.predict(states, verbose=0)
-        target_next = self.target_model.predict(next_states, verbose=0)
+        # Predict Q-values for next states using the main network (for selecting the best action)
+        main_q_next = self.model.predict(next_states, verbose=0)
+        # Predict Q-values for next states using the target network (for evaluation)
+        target_q_next = self.target_model.predict(next_states, verbose=0)
 
-        # Update the Q-value for the taken action
+        # Update target for each sample in the mini-batch
         for i in range(self.batch_size):
             if dones[i]:
                 target[i][actions[i]] = rewards[i]
             else:
-                target[i][actions[i]] = rewards[i] + self.discount_factor * np.amax(target_next[i])
+                # Double DQN: select best action using main network, evaluate using target network
+                best_action = np.argmax(main_q_next[i])
+                target[i][actions[i]] = rewards[i] + self.discount_factor * target_q_next[i][best_action]
 
-        # Fit the main network on the updated target values
+        # Train the main network on the updated target values
         self.model.fit(states, target, epochs=1, verbose=0)
 
-        # Increment the training step counter and update target network if needed
+        # Update the target network periodically
         self.train_counter += 1
         if self.train_counter % self.target_update_freq == 0:
             self.update_target_model()
 
     def update_epsilon(self):
         """
-        Update the exploration rate using decay.
+        Decay the exploration rate.
         """
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
 
     def save(self, filepath):
         """
-        Save the current Q-network to a file.
+        Save the main network to a file.
         """
         self.model.save(filepath)

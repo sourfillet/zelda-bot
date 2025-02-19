@@ -32,6 +32,10 @@
       "address": 1627,
       "type": "|u1"
     },
+    "Clock": {
+      "address": 1644,
+      "type": "|u1"
+    },
     "Deaths": {
       "address": 630,
       "type": "|u1"
@@ -139,6 +143,10 @@
     "Triforce Pieces": {
       "address": 1649,
       "type": "|u1"
+    },
+    "general": {
+      "address": 1540,
+      "type": "<>u4"
     }
   }
 }

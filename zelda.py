@@ -90,9 +90,9 @@ def get_reward(visited_rooms, info=None, old_info=None, level_state="gamestart")
 
     if info['Hearts'] != old_info['Hearts']:
         if info['Hearts'] < old_info['Hearts']:
-            reward -= old_info['Hearts'] - info['Hearts']
+            reward -= 1
         elif info['Hearts'] > old_info['Hearts']:
-            reward += info['Hearts'] - old_info['Hearts']
+            reward += 1
 
     if info['Room'] not in visited_rooms:
         visited_rooms[info['Room']] = {}
@@ -105,7 +105,7 @@ def get_reward(visited_rooms, info=None, old_info=None, level_state="gamestart")
         Zelda has a counter for how many enemies have been killed in the current room.
         The counter resets at 10, so if it's 0 and the old counter was 9, that counts as a kill.
         """
-        reward += 10
+        reward += 50
 
 
     # Encourage movement around the room
@@ -116,14 +116,12 @@ def get_reward(visited_rooms, info=None, old_info=None, level_state="gamestart")
         reward += reward_values['repeat_state']
         
     if info['Enemies Killed'] != old_info['Enemies Killed']:
-        reward += (info['Enemies Killed'] - old_info['Enemies Killed']) * 10
+        reward += 100
 
 
     if info['Deaths'] != old_info['Deaths']:
         if info['Deaths'] > old_info['Deaths']:
-            reward -= (info['Deaths'] - old_info['Deaths'])
-        elif info['Deaths'] < old_info['Deaths']:
-            reward += (old_info['Deaths'] - info['Deaths'])
+            reward -= 5
 
     old_info = info
     return reward, old_info, visited_rooms
