@@ -143,10 +143,6 @@
     "Triforce Pieces": {
       "address": 1649,
       "type": "|u1"
-    },
-    "general": {
-      "address": 1540,
-      "type": "<>u4"
     }
   }
 }

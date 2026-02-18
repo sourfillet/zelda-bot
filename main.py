@@ -7,12 +7,14 @@ import json
 import os
 import datetime
 import glob
+import csv
 import tensorflow as tf
 from models.DQN import DQNAgent
 from zelda import get_actual_hearts, single_pickup_items, multi_pickup_items, get_reward, dungeon_save_states
 
-tf.config.run_functions_eagerly(True)
-tf.data.experimental.enable_debug_mode()
+# Debug mode disabled for performance - uncomment only when debugging specific issues
+# tf.config.run_functions_eagerly(True)
+# tf.data.experimental.enable_debug_mode()
 
 def preprocess_state(state):
     """
@@ -40,17 +42,21 @@ def parse_arguments():
     """
     Parse command-line arguments and return the arguments object.
     """
+    # First pass: parse --config to get the config file
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument('--config', type=str, default='config.txt', help="Path to config file")
-    args, _ = parser.parse_known_args()
+    parser.add_argument('--config', type=str, default='modelargs.json', help="Path to config file")
+    args, remaining = parser.parse_known_args()
 
     config_defaults = load_config(args.config)
 
+    # Second pass: parse all arguments with config defaults
     parser = argparse.ArgumentParser(
         description="Train a DQN agent on a retro game environment"
     )
-    parser.add_argument('--state', type=str, default='level1', help='Name of the state to start in')
-    parser.add_argument('--model', type=str, default='DQN',
+    parser.add_argument('--config', type=str, default='modelargs.json', help="Path to config file")
+    parser.add_argument('--state', type=str, default=config_defaults.get('state', 'level1'),
+                        help='Name of the state to start in')
+    parser.add_argument('--model', type=str, default=config_defaults.get('model', 'DQN'),
                         help='Model to use: DQN, DDPG, DoubleDQN')
     parser.add_argument('--game', type=str, default=config_defaults.get('game', 'Zelda'),
                         help='Name of the game environment')
@@ -68,6 +74,10 @@ def parse_arguments():
                         help='Minimum epsilon value')
     parser.add_argument('--max_frames', type=int, default=1000,
                         help='Maximum number of frames per episode')
+    parser.add_argument('--load_model', type=str, default=None,
+                        help='Path to a specific model file to load, or "latest" to load most recent')
+    parser.add_argument('--record_freq', type=int, default=25,
+                        help='Record video every N episodes (default: 25)')
     return parser.parse_args()
 
 def get_video_writer(episode, frame_size, fps=30):
@@ -78,16 +88,16 @@ def get_video_writer(episode, frame_size, fps=30):
     recordings_dir = "recordings"
     if not os.path.exists(recordings_dir):
         os.makedirs(recordings_dir)
-    
+
     # Create a subdirectory with a timestamp for this run
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_dir = os.path.join(recordings_dir, timestamp)
     if not os.path.exists(run_dir):
         os.makedirs(run_dir)
-    
+
     # Set the video file path
     video_path = os.path.join(run_dir, f"episode_{episode}.avi")
-    
+
     fourcc = cv2.VideoWriter_fourcc(*'XVID')
     writer = cv2.VideoWriter(video_path, fourcc, fps, frame_size)
     return writer
@@ -100,7 +110,7 @@ def integrate(state=retro.State.DEFAULT):
     print("Path: ", path)
     retro.data.Integrations.add_custom_path(path)
     print("Zelda in integrations:", "Zelda" in retro.data.list_games(inttype=retro.data.Integrations.ALL))
-    env = retro.make("Zelda", state=state, inttype=retro.data.Integrations.ALL, render_mode="rgb_array")
+    env = retro.make("Zelda", state=state, inttype=retro.data.Integrations.ALL)
     return env
 
 def save_model(agent, episode, model_dir="saved_models"):
@@ -116,6 +126,21 @@ def save_model(agent, episode, model_dir="saved_models"):
     agent.model.save(model_path)
     print("Model saved at:", model_path)
     return model_path
+
+def log_episode_stats(episode, episode_reward, moving_avg, avg_loss, epsilon, frames, training_steps, buffer_size, log_file="training_log.csv"):
+    """
+    Log episode statistics to a CSV file for later analysis.
+    Creates the file with headers if it doesn't exist.
+    """
+    file_exists = os.path.exists(log_file)
+
+    with open(log_file, 'a', newline='') as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(['episode', 'episode_reward', 'moving_avg', 'avg_loss', 'epsilon', 'frames', 'training_steps', 'replay_buffer_size', 'timestamp'])
+
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        writer.writerow([episode, f"{episode_reward:.2f}", f"{moving_avg:.2f}", f"{avg_loss:.4f}", f"{epsilon:.4f}", frames, training_steps, buffer_size, timestamp])
 
 def load_model_into_agent(agent, model_dir="saved_models", learning_rate=0.001, model_file=None):
     """
@@ -153,11 +178,21 @@ def main():
         agent = DQNAgent(state_size, action_size, args.learning_rate,
                          args.discount_factor, args.epsilon, args.epsilon_decay, args.epsilon_min)
 
+    # Load a pre-trained model ONCE at startup if requested
+    if args.load_model:
+        if args.load_model == "latest":
+            load_model_into_agent(agent, learning_rate=args.learning_rate)
+        else:
+            load_model_into_agent(agent, learning_rate=args.learning_rate, model_file=args.load_model)
+        print(f"Loaded model. Starting epsilon: {agent.epsilon}")
+
+    # Track best performance for saving
+    best_reward = float('-inf')
+    episode_rewards = []
+
     # Train the agent
     for episode in range(args.num_episodes):
-        # load a pre-trained model into the agent.
-        load_model_into_agent(agent, learning_rate=args.learning_rate)
-        
+
         state = env.reset()
         old_info = None
         visited_rooms = {}
@@ -167,12 +202,16 @@ def main():
         # Initialize per-episode reward counter.
         episode_reward = 0
 
-        # Create a video writer for this episode.
-        frame = env.render()
-        height, width, channels = frame.shape
-        writer = get_video_writer(episode, (width, height), fps=30)
+        # Create a video writer for this episode (only if it's a recording episode)
+        writer = None
+        if episode % args.record_freq == 0:
+            frame = env.em.get_screen()
+            height, width, channels = frame.shape
+            writer = get_video_writer(episode, (width, height), fps=30)
 
         frame_count = 0  # Frame counter for this episode
+        episode_loss = 0  # Track total loss for this episode
+        training_steps = 0  # Count training steps in this episode
 
         while not done and frame_count < args.max_frames:
             frame_count += 1
@@ -186,48 +225,89 @@ def main():
                 reward, old_info, visited_rooms = get_reward(visited_rooms, info, old_info, args.state)
                 print("Episode:", episode, "Frame:", frame_count, "of", args.max_frames)
 
+                # Grace period: eliminate repeat_state penalty for first 200 frames
+                # This encourages early exploration before agent gets stuck
+                if frame_count < 200 and reward == -0.05:
+                    reward = 0
+
                 if info["Room"] != 116:
-                    reward = -10
+                    reward = -100000
                     done = True
                 total_rewards += reward
                 episode_reward += reward  # update reward for this episode
                 print("Total rewards:", total_rewards)
 
                 next_state = preprocess_state(next_state)
-                agent.train(state, action, reward, next_state, done)
+
+                # Train every 4 frames instead of every frame (4x speedup)
+                if frame_count % 4 == 0:
+                    loss = agent.train(state, action, reward, next_state, done)
+                    if loss is not None:
+                        episode_loss += loss
+                        training_steps += 1
+
                 state = next_state
 
-            # Capture the frame and overlay the episode, frame count, and reward information.
-            frame = env.render()
-            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            overlay_text = f"Ep: {episode} | Frame: {frame_count} | Reward: {episode_reward}"
+            # Capture the frame and overlay the episode, frame count, and reward information (only if recording).
+            if writer is not None:
+                frame = env.em.get_screen()
+                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                overlay_text = f"Ep: {episode} | Frame: {frame_count} | Reward: {episode_reward}"
 
-            # Define font parameters.
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 0.3
-            thickness = 1
+                # Define font parameters.
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                font_scale = 0.3
+                thickness = 1
 
-            # Get the size of the text box.
-            (text_width, text_height), baseline = cv2.getTextSize(overlay_text, font, font_scale, thickness)
+                # Get the size of the text box.
+                (text_width, text_height), baseline = cv2.getTextSize(overlay_text, font, font_scale, thickness)
 
-            # Set the origin for the text.
-            x, y = 10, text_height + 5
+                # Set the origin for the text.
+                x, y = 10, text_height + 5
 
-            # Draw a filled black rectangle as the background for the text.
-            cv2.rectangle(frame_bgr, (x - 5, y - text_height - 5), (x + text_width + 5, y + baseline + 5), (0, 0, 0), cv2.FILLED)
+                # Draw a filled black rectangle as the background for the text.
+                cv2.rectangle(frame_bgr, (x - 5, y - text_height - 5), (x + text_width + 5, y + baseline + 5), (0, 0, 0), cv2.FILLED)
 
-            # Put the white text on top.
-            cv2.putText(frame_bgr, overlay_text, (x, y), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+                # Put the white text on top.
+                cv2.putText(frame_bgr, overlay_text, (x, y), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
 
-            writer.write(frame_bgr)
+                writer.write(frame_bgr)
 
-        writer.release()
+        if writer is not None:
+            writer.release()
         agent.update_epsilon()
 
-        # Save the trained model at the end of each episode.
-        save_model(agent, episode)
+        # Track episode performance
+        episode_rewards.append(episode_reward)
+        avg_loss = episode_loss / max(training_steps, 1)
 
-    env.close()
+        # Calculate moving average over last 10 episodes
+        window_size = min(10, len(episode_rewards))
+        moving_avg = sum(episode_rewards[-window_size:]) / window_size
+
+        # Print progress every episode
+        print(f"\n{'='*60}")
+        print(f"Episode {episode + 1}/{args.num_episodes} Complete")
+        print(f"{'='*60}")
+        print(f"Episode Reward: {episode_reward:.2f}")
+        print(f"Moving Avg (last {window_size}): {moving_avg:.2f}")
+        print(f"Avg Loss: {avg_loss:.4f}")
+        print(f"Epsilon: {agent.epsilon:.4f}")
+        print(f"Frames: {frame_count}")
+        print(f"Training Steps: {training_steps}")
+        print(f"Replay Buffer Size: {len(agent.memory)}")
+        print(f"{'='*60}\n")
+
+        # Log stats to CSV
+        log_episode_stats(episode, episode_reward, moving_avg, avg_loss, agent.epsilon,
+                         frame_count, training_steps, len(agent.memory))
+
+        # Save model if this is the best performance so far, or every 50 episodes
+        if episode_reward > best_reward or episode % 50 == 0:
+            if episode_reward > best_reward:
+                best_reward = episode_reward
+                print(f"New best reward: {best_reward:.2f} - Saving model!")
+            save_model(agent, episode)
 
 if __name__ == "__main__":
     main()

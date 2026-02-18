@@ -72,6 +72,7 @@ class DQNAgent:
         """
         Store the transition in memory and train the model using experience replay.
         This method uses a mini-batch of past transitions and computes targets using the target network.
+        Returns the training loss if training occurred, otherwise None.
         """
         # Convert one-hot action to index if necessary
         if isinstance(action, np.ndarray) and action.shape == (self.action_size,):
@@ -84,7 +85,7 @@ class DQNAgent:
 
         # Only start training when enough samples are available
         if len(self.memory) < self.batch_size:
-            return
+            return None
 
         # Sample a mini-batch from the memory
         minibatch = random.sample(self.memory, self.batch_size)
@@ -108,12 +109,14 @@ class DQNAgent:
                 target[i][actions[i]] = rewards[i] + self.discount_factor * np.amax(target_next[i])
 
         # Fit the main network on the updated target values
-        self.model.fit(states, target, epochs=1, verbose=0)
+        history = self.model.fit(states, target, epochs=1, verbose=0)
 
         # Increment the training step counter and update target network if needed
         self.train_counter += 1
         if self.train_counter % self.target_update_freq == 0:
             self.update_target_model()
+
+        return history.history['loss'][0]
 
     def update_epsilon(self):
         """

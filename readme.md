@@ -51,7 +51,13 @@ You can install the required libraries using pip and the requirements.txt file:
 
 Once gym-retro is set up and the game is integrated, you can train the models by running main.py:
 
-    python -m main
+    python main.py --config modelargs.json
+
+For a quick 500-episode training run on room 116 (combat training):
+
+    python main.py --config modelargs.json
+
+This will train for ~4-8 hours on a 3060 Ti and should show visible learning progress by episode 100-200.
 
 Configuration settings can be set either in modelargs.json or on the command line by specifying --arg and following it with an appropriate value. The arguments are listed below:
 
@@ -70,10 +76,17 @@ Note that the model will be saved under the directory ./saved_models.
 
 ### Loading models
 
-The code, by default, will load the most recent model based on the model parameter. You can force it to start a new model by commenting these lines:
+To start fresh training without loading any model:
 
-    # load a pre-trained model into the agent.
-    load_model_into_agent(agent)
+    python main.py --config modelargs.json
+
+To resume from the most recent saved model:
+
+    python main.py --config modelargs.json --load_model latest
+
+To load a specific model file:
+
+    python main.py --config modelargs.json --load_model saved_models/DQNAgent_episode100_20260104_120000.h5
 
 ## To-do list 
 

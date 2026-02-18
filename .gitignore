@@ -5,12 +5,12 @@ Zelda/test
 Zelda/monsters.state
 saved_models/*
 recordings/*
-integrate.py
-test_gym.py
-test_numpy.py
-models/DDPG.py
+runs/*
+training_log.csv
 cuda-keyring_1.0-1_all.deb
 scripts/__pycache__/gputest.cpython-38.pyc
 scripts/__pycache__/gputest.cpython-310.pyc
 __pycache__
 .python_version
+.venv/*
+models/__pycache__/DQN.cpython*

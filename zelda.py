@@ -96,7 +96,8 @@ def get_reward(visited_rooms, info=None, old_info=None, level_state="gamestart")
 
     if info['Room'] not in visited_rooms:
         visited_rooms[info['Room']] = {}
-        reward += reward_values['new_room']
+        if info['Room'] != 116:
+            reward += reward_values['new_room']
     elif (info['Room'] == old_info['Room'] 
         and (info["Enemies Killed Current Room"] > old_info["Enemies Killed Current Room"]
              or (info["Enemies Killed Current Room"] == 0 and old_info["Enemies Killed Current Room"] == 9))):
