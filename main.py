@@ -216,7 +216,9 @@ def main():
     # It also resolves the start state, falling back to the game's default.
     adapter = load_adapter(args.game, args.state)
     state_name = adapter.state if hasattr(adapter, 'state') else args.state
-    env = integrate(args.game, state_name)
+    # integration_name, not args.game: retro's bundled integrations are named
+    # "<Game>-<Platform>", which cannot double as a Python package name.
+    env = integrate(adapter.integration_name, state_name)
     action_size = len(adapter.actions)
     log_columns = BASE_LOG_COLUMNS + list(adapter.log_fields) + ['timestamp']
     total_rewards = 0

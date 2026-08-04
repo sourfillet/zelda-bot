@@ -14,8 +14,15 @@ class GameAdapter:
     Class attributes describe the game; the methods carry per-episode state.
     """
 
-    # retro integration name (must match this game's directory under games/)
+    # this game's directory under games/, and the value passed to --game.
+    # Must be a valid Python identifier, since it is imported as a package.
     name: str | None = None
+    # retro integration id passed to retro.make(). Defaults to `name`, which is
+    # right for custom integrations living in games/. Set it explicitly when the
+    # integration id is not a valid identifier — every game bundled with retro is
+    # "<Game>-<Platform>" (e.g. "SuperMarioBros-Nes"), and a hyphen cannot appear
+    # in a package name.
+    retro_name: str | None = None
     # default emulator start state when --state is not given
     default_state: str | None = None
     # discrete action set: each entry is a retro MultiBinary button array, held
@@ -26,6 +33,11 @@ class GameAdapter:
     actions_released: list[list[int]] | None = None
     # extra CSV columns this game contributes to training_log.csv
     log_fields: list[str] = []
+
+    @property
+    def integration_name(self):
+        """The id to hand to retro.make(). See `retro_name`."""
+        return self.retro_name or self.name
 
     def reset(self):
         """Reset per-episode trackers. Called at the start of every episode."""

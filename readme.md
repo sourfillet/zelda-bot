@@ -129,11 +129,20 @@ Checkpoints are saved as `.keras`; older `.h5` files still load. Resuming drops 
 
 ## How do I add another game?
 
-1. Create `games/<GameName>/` containing the gym-retro integration files (`data.json`, `scenario.json`, `metadata.json`, `rom.sha`, and your save states).
+1. Create `games/<GameName>/` containing the gym-retro integration files (`data.json`, `scenario.json`, `metadata.json`, `rom.sha`, and your save states). **Or** skip this entirely if retro already bundles the game — it ships verified integrations for 300+ titles.
 2. Add `games/<GameName>/adapter.py` with a `get_adapter(state)` factory returning a subclass of `GameAdapter` (see [games/base.py](games/base.py)). The adapter owns the action set, the reward shaping, the termination rules, and any extra columns you want in the training log.
 3. Run `python main.py --game <GameName>`.
 
-`main.py` does not need to change. `games/Zelda/adapter.py` is the reference implementation.
+`main.py` does not need to change.
+
+The directory name is a Python package name, so it has to be a valid identifier. Retro's bundled integrations are all named `<Game>-<Platform>` and a hyphen is not, so set `retro_name` on the adapter when the two differ:
+
+    name = "SuperMarioBros"            # games/SuperMarioBros/, and --game
+    retro_name = "SuperMarioBros-Nes"  # what retro.make() is given
+
+Two reference implementations: [games/Zelda/adapter.py](games/Zelda/adapter.py) ships its own integration under `games/`, and [games/SuperMarioBros/adapter.py](games/SuperMarioBros/adapter.py) reuses one bundled with retro. For a bundled game the ROM goes into retro's data directory rather than `games/`:
+
+    python -m retro.import /path/to/directory/containing/roms
 
 ## To-do list
 
