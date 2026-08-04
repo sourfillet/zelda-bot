@@ -7,9 +7,9 @@ import random
 from collections import deque
 
 class DQNAgent:
-    def __init__(self, state_size, action_size, learning_rate, discount_factor, 
+    def __init__(self, input_shape, action_size, learning_rate, discount_factor,
                  epsilon, epsilon_decay, epsilon_min):
-        self.state_size = state_size    # Not used directly; state shape comes from preprocessed images.
+        self.input_shape = input_shape  # (height, width, stacked_frames), e.g. (84, 84, 4)
         self.action_size = action_size
         self.learning_rate = learning_rate
         self.discount_factor = discount_factor
@@ -18,7 +18,7 @@ class DQNAgent:
         self.epsilon_min = epsilon_min
 
         # Experience Replay parameters
-        self.memory = deque(maxlen=2000)
+        self.memory = deque(maxlen=20000)
         self.batch_size = 32
         self.train_start = 32  # Begin training only when memory has at least this many samples.
 
@@ -36,7 +36,10 @@ class DQNAgent:
         Build the DQN model.
         """
         model = Sequential()
-        model.add(Conv2D(32, (8, 8), strides=(4, 4), activation='relu', input_shape=(84, 84, 1)))
+        # Normalize uint8 frames [0, 255] -> [0, 1] so Q-values stay in a
+        # numerically stable range (matches RainbowDQN)
+        model.add(tf.keras.layers.Rescaling(1.0 / 255.0, input_shape=self.input_shape))
+        model.add(Conv2D(32, (8, 8), strides=(4, 4), activation='relu'))
         model.add(Conv2D(64, (4, 4), strides=(2, 2), activation='relu'))
         model.add(Conv2D(64, (3, 3), activation='relu'))
         model.add(Flatten())
@@ -51,6 +54,15 @@ class DQNAgent:
         """
         self.target_model.set_weights(self.model.get_weights())
 
+    def _bootstrap_values(self, next_states):
+        """
+        Per-sample value of the next state used in the Bellman target.
+        Standard DQN: max_a Q_target(s', a). Subclasses override this to change
+        the bootstrap rule (e.g. Double DQN) without touching train().
+        """
+        target_next = self.target_model(next_states, training=False).numpy()
+        return np.amax(target_next, axis=1)
+
     def act(self, state):
         """
         Choose an action based on the epsilon-greedy policy.
@@ -62,7 +74,7 @@ class DQNAgent:
             action[action_index] = 1
             return action
 
-        q_values = self.model.predict(state, verbose=0)
+        q_values = self.model(state, training=False).numpy()
         action_index = np.argmax(q_values[0])
         action = np.zeros(self.action_size, dtype=int)
         action[action_index] = 1
@@ -97,16 +109,17 @@ class DQNAgent:
         rewards = np.array([sample[2] for sample in minibatch])
         dones = np.array([sample[4] for sample in minibatch]).astype(int)
 
-        # Predict Q-values for current states and for next states (using target network)
-        target = self.model.predict(states, verbose=0)
-        target_next = self.target_model.predict(next_states, verbose=0)
+        # Predict Q-values for current states; bootstrap next-state values via
+        # the (overridable) target rule.
+        target = self.model(states, training=False).numpy()
+        bootstrap = self._bootstrap_values(next_states)
 
         # Update the Q-value for the taken action
         for i in range(self.batch_size):
             if dones[i]:
                 target[i][actions[i]] = rewards[i]
             else:
-                target[i][actions[i]] = rewards[i] + self.discount_factor * np.amax(target_next[i])
+                target[i][actions[i]] = rewards[i] + self.discount_factor * bootstrap[i]
 
         # Fit the main network on the updated target values
         history = self.model.fit(states, target, epochs=1, verbose=0)

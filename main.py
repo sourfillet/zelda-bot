@@ -9,23 +9,43 @@ import datetime
 import glob
 import csv
 import tensorflow as tf
+from collections import deque
 from models.DQN import DQNAgent
-from zelda import get_actual_hearts, single_pickup_items, multi_pickup_items, get_reward, dungeon_save_states
+from models.DoubleDQN import DoubleDQNAgent
+from models.RainbowDQN import RainbowDQNAgent
+from games import load_adapter
 
 # Debug mode disabled for performance - uncomment only when debugging specific issues
 # tf.config.run_functions_eagerly(True)
 # tf.data.experimental.enable_debug_mode()
 
-def preprocess_state(state):
+# Network input: 4 stacked 84x84 grayscale frames. Generic across retro games —
+# every observation is resized to 84x84 in preprocess_frame regardless of game.
+INPUT_SHAPE = (84, 84, 4)
+
+# Repeat each chosen action for this many emulated frames (standard Atari
+# frame skip). Rewards from every frame are accumulated into the stored
+# transition, so no reward signal is lost. The game adapter supplies the
+# action set and the back-half "released" variant for edge-triggered buttons.
+FRAME_SKIP = 4
+
+def preprocess_frame(obs):
     """
-    Preprocess the state by resizing it to a smaller size and converting it to grayscale.
+    Preprocess a single observation: resize to 84x84 and convert to grayscale.
+    Returns shape (84, 84, 1).
     """
-    if isinstance(state, tuple):
-        state = state[0]
-    state = cv2.resize(state, (84, 84))
-    state = cv2.cvtColor(state, cv2.COLOR_RGB2GRAY)
-    state = np.reshape(state, [1, 84, 84, 1])
-    return state
+    if isinstance(obs, tuple):
+        obs = obs[0]
+    obs = cv2.resize(obs, (84, 84))
+    obs = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY)
+    return np.reshape(obs, [84, 84, 1])
+
+def get_stacked_state(frame_stack):
+    """
+    Concatenate 4 frames along the channel axis.
+    Returns shape (1, 84, 84, 4) for batch inference.
+    """
+    return np.reshape(np.concatenate(list(frame_stack), axis=2), [1, 84, 84, 4])
 
 def load_config(config_file):
     """
@@ -54,10 +74,10 @@ def parse_arguments():
         description="Train a DQN agent on a retro game environment"
     )
     parser.add_argument('--config', type=str, default='modelargs.json', help="Path to config file")
-    parser.add_argument('--state', type=str, default=config_defaults.get('state', 'level1'),
-                        help='Name of the state to start in')
+    parser.add_argument('--state', type=str, default=config_defaults.get('state'),
+                        help="Name of the state to start in (defaults to the game's default state)")
     parser.add_argument('--model', type=str, default=config_defaults.get('model', 'DQN'),
-                        help='Model to use: DQN, DDPG, DoubleDQN')
+                        help='Model to use: DQN, DoubleDQN, RainbowDQN')
     parser.add_argument('--game', type=str, default=config_defaults.get('game', 'Zelda'),
                         help='Name of the game environment')
     parser.add_argument('--num_episodes', type=int, default=config_defaults.get('num_episodes', 20),
@@ -66,51 +86,58 @@ def parse_arguments():
                         help='Learning rate for the agent')
     parser.add_argument('--discount_factor', type=float, default=config_defaults.get('discount_factor', 0.99),
                         help='Discount factor for training')
-    parser.add_argument('--epsilon', type=float, default=config_defaults.get('epsilon', 1.0),
+    # Defaults to None so we can tell "user typed --epsilon" apart from "value
+    # came from the config file"; --load_model uses that to decide whether to
+    # override the starting epsilon. Resolved below.
+    parser.add_argument('--epsilon', type=float, default=None,
                         help='Initial exploration rate')
     parser.add_argument('--epsilon_decay', type=float, default=config_defaults.get('epsilon_decay', 0.995),
                         help='Epsilon decay rate')
     parser.add_argument('--epsilon_min', type=float, default=config_defaults.get('epsilon_min', 0.01),
                         help='Minimum epsilon value')
-    parser.add_argument('--max_frames', type=int, default=1000,
+    parser.add_argument('--max_frames', type=int, default=config_defaults.get('max_frames', 2000),
                         help='Maximum number of frames per episode')
     parser.add_argument('--load_model', type=str, default=None,
                         help='Path to a specific model file to load, or "latest" to load most recent')
     parser.add_argument('--record_freq', type=int, default=25,
                         help='Record video every N episodes (default: 25)')
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    # Resolve the epsilon sentinel, remembering whether it was set on the CLI.
+    args.epsilon_from_cli = args.epsilon is not None
+    if args.epsilon is None:
+        args.epsilon = config_defaults.get('epsilon', 1.0)
+    return args
 
 def get_video_writer(episode, frame_size, fps=30):
     """
     Create a VideoWriter to record footage of an episode.
     """
-    # Create the main recordings directory if it doesn't exist
     recordings_dir = "recordings"
     if not os.path.exists(recordings_dir):
         os.makedirs(recordings_dir)
 
-    # Create a subdirectory with a timestamp for this run
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_dir = os.path.join(recordings_dir, timestamp)
     if not os.path.exists(run_dir):
         os.makedirs(run_dir)
 
-    # Set the video file path
     video_path = os.path.join(run_dir, f"episode_{episode}.avi")
 
     fourcc = cv2.VideoWriter_fourcc(*'XVID')
     writer = cv2.VideoWriter(video_path, fourcc, fps, frame_size)
     return writer
 
-def integrate(state=retro.State.DEFAULT):
+def integrate(game, state=retro.State.DEFAULT):
     """
-    Integrate the custom Zelda environment into the Retro data set.
+    Integrate a custom game environment (games/<game>/) into the Retro data set.
     """
-    path = os.path.dirname(os.path.abspath(__file__))
-    print("Path: ", path)
-    retro.data.Integrations.add_custom_path(path)
-    print("Zelda in integrations:", "Zelda" in retro.data.list_games(inttype=retro.data.Integrations.ALL))
-    env = retro.make("Zelda", state=state, inttype=retro.data.Integrations.ALL)
+    games_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "games")
+    print("Games path: ", games_path)
+    retro.data.Integrations.add_custom_path(games_path)
+    available = retro.data.list_games(inttype=retro.data.Integrations.ALL)
+    print(f"{game} in integrations:", game in available)
+    env = retro.make(game, state=state, inttype=retro.data.Integrations.ALL)
     return env
 
 def save_model(agent, episode, model_dir="saved_models"):
@@ -121,42 +148,60 @@ def save_model(agent, episode, model_dir="saved_models"):
     if not os.path.exists(model_dir):
         os.makedirs(model_dir)
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{agent.__class__.__name__}_episode{episode}_{timestamp}.h5"
+    filename = f"{agent.__class__.__name__}_episode{episode}_{timestamp}.keras"
     model_path = os.path.join(model_dir, filename)
     agent.model.save(model_path)
     print("Model saved at:", model_path)
     return model_path
 
-def log_episode_stats(episode, episode_reward, moving_avg, avg_loss, epsilon, frames, training_steps, buffer_size, log_file="training_log.csv"):
+# Game-agnostic log columns. The chosen game adapter contributes extra columns
+# (adapter.log_fields) inserted before 'timestamp'.
+BASE_LOG_COLUMNS = ['episode', 'episode_reward', 'moving_avg', 'avg_loss', 'epsilon', 'frames',
+                    'training_steps', 'replay_buffer_size']
+
+def log_episode_stats(columns, values, log_file="training_log.csv"):
     """
     Log episode statistics to a CSV file for later analysis.
-    Creates the file with headers if it doesn't exist.
-    """
-    file_exists = os.path.exists(log_file)
+    Creates the file with headers if it doesn't exist. If an existing file has
+    a different header (e.g. a different game's columns), it is rotated to a
+    backup so rows never get misaligned.
 
+    Args:
+        columns: ordered list of column names (the CSV header)
+        values:  dict mapping every column name to its value for this episode
+    """
+    if os.path.exists(log_file):
+        with open(log_file, newline='') as f:
+            header = f.readline().strip().split(',')
+        if header != columns:
+            backup = log_file.replace('.csv', '_legacy.csv')
+            os.replace(log_file, backup)
+            print(f"Log columns changed — rotated old log to {backup}")
+
+    file_exists = os.path.exists(log_file)
     with open(log_file, 'a', newline='') as f:
         writer = csv.writer(f)
         if not file_exists:
-            writer.writerow(['episode', 'episode_reward', 'moving_avg', 'avg_loss', 'epsilon', 'frames', 'training_steps', 'replay_buffer_size', 'timestamp'])
+            writer.writerow(columns)
+        writer.writerow([values[c] for c in columns])
 
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        writer.writerow([episode, f"{episode_reward:.2f}", f"{moving_avg:.2f}", f"{avg_loss:.4f}", f"{epsilon:.4f}", frames, training_steps, buffer_size, timestamp])
-
-def load_model_into_agent(agent, model_dir="saved_models", learning_rate=0.001, model_file=None):
+def load_model_into_agent(agent, model_dir="saved_models", model_file=None):
     """
-    Load a model from model_dir (or from a specified file) and assign it to the agent.
-    If model_file is not provided, the most recent model file is loaded.
+    Load weights from a saved model file into the agent's existing model.
+    Supports .keras (preferred) and legacy .h5 files.
+    If model_file is not provided, the most recent file is loaded.
+
+    Loads weights only (not the full model graph) so the agent retains its
+    current compile settings — loss function, optimizer, clipnorm, etc.
     """
     if model_file is None:
-        files = glob.glob(os.path.join(model_dir, "*.h5"))
+        files = (glob.glob(os.path.join(model_dir, "*.keras")) +
+                 glob.glob(os.path.join(model_dir, "*.h5")))
         if not files:
             print("No model files found in", model_dir)
             return None
         model_file = max(files, key=os.path.getctime)
-    agent.model = tf.keras.models.load_model(model_file)
-
-    # Recompile the model with the specified learning rate
-    agent.model.compile(loss='mean_squared_error', optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate))
+    agent.model.load_weights(model_file)
     print("Model loaded from:", model_file)
     return model_file
 
@@ -167,24 +212,40 @@ def main():
     for arg in vars(args):
         print(f"{arg}: {getattr(args, arg)}")
 
-    env = integrate(args.state)
-    state_shape = env.observation_space.shape  # e.g., (height, width, channels)
-    state_size = state_shape[0]
-    action_size = env.action_space.n
+    # Load the game adapter (action set, reward shaping, termination, metrics).
+    # It also resolves the start state, falling back to the game's default.
+    adapter = load_adapter(args.game, args.state)
+    state_name = adapter.state if hasattr(adapter, 'state') else args.state
+    env = integrate(args.game, state_name)
+    action_size = len(adapter.actions)
+    log_columns = BASE_LOG_COLUMNS + list(adapter.log_fields) + ['timestamp']
     total_rewards = 0
 
     # Initialize the agent
     if args.model == 'DQN':
-        agent = DQNAgent(state_size, action_size, args.learning_rate,
+        agent = DQNAgent(INPUT_SHAPE, action_size, args.learning_rate,
                          args.discount_factor, args.epsilon, args.epsilon_decay, args.epsilon_min)
+    elif args.model == 'DoubleDQN':
+        agent = DoubleDQNAgent(INPUT_SHAPE, action_size, args.learning_rate,
+                               args.discount_factor, args.epsilon, args.epsilon_decay, args.epsilon_min)
+    elif args.model == 'RainbowDQN':
+        agent = RainbowDQNAgent(INPUT_SHAPE, action_size, args.learning_rate,
+                                args.discount_factor, args.epsilon, args.epsilon_decay, args.epsilon_min)
+    else:
+        raise SystemExit(f"Unknown model {args.model!r}. Choose DQN, DoubleDQN, or RainbowDQN.")
 
     # Load a pre-trained model ONCE at startup if requested
     if args.load_model:
         if args.load_model == "latest":
-            load_model_into_agent(agent, learning_rate=args.learning_rate)
+            load_model_into_agent(agent)
         else:
-            load_model_into_agent(agent, learning_rate=args.learning_rate, model_file=args.load_model)
-        print(f"Loaded model. Starting epsilon: {agent.epsilon}")
+            load_model_into_agent(agent, model_file=args.load_model)
+        # Sync target network to the loaded weights so Bellman targets are correct immediately
+        agent.update_target_model()
+        # Resume with minimal exploration unless the caller explicitly passed --epsilon
+        if not args.epsilon_from_cli:
+            agent.epsilon = args.epsilon_min
+        print(f"Loaded model. Resuming with epsilon: {agent.epsilon}")
 
     # Track best performance for saving
     best_reward = float('-inf')
@@ -193,11 +254,14 @@ def main():
     # Train the agent
     for episode in range(args.num_episodes):
 
-        state = env.reset()
-        old_info = None
-        visited_rooms = {}
-        state = preprocess_state(state)
+        obs = env.reset()
+        adapter.reset()
         done = False
+
+        # Initialize frame stack with 4 copies of the first frame
+        frame = preprocess_frame(obs)
+        frame_stack = deque([frame] * 4, maxlen=4)
+        state = get_stacked_state(frame_stack)
 
         # Initialize per-episode reward counter.
         episode_reward = 0
@@ -205,8 +269,8 @@ def main():
         # Create a video writer for this episode (only if it's a recording episode)
         writer = None
         if episode % args.record_freq == 0:
-            frame = env.em.get_screen()
-            height, width, channels = frame.shape
+            screen = env.em.get_screen()
+            height, width, channels = screen.shape
             writer = get_video_writer(episode, (width, height), fps=30)
 
         frame_count = 0  # Frame counter for this episode
@@ -214,74 +278,85 @@ def main():
         training_steps = 0  # Count training steps in this episode
 
         while not done and frame_count < args.max_frames:
-            frame_count += 1
-
             action = agent.act(state)
-            next_state, reward, terminated, truncated, info = env.step(action)
-            done = terminated or truncated
+            action_index = int(np.argmax(action))
+            reward = 0
 
-            # Process rewards only when the map is not scrolling.
-            if info["Map Scroll LR"] == 0 and info["Map Scroll UD"] == 255:
-                reward, old_info, visited_rooms = get_reward(visited_rooms, info, old_info, args.state)
-                print("Episode:", episode, "Frame:", frame_count, "of", args.max_frames)
+            # Repeat the chosen action for FRAME_SKIP frames, accumulating every
+            # frame's reward into the single stored transition. Acting once per
+            # skip window is ~4x fewer network inferences per emulated frame.
+            # Edge-triggered buttons are released for the back half of the window
+            # via the adapter's actions_released variant.
+            actions_released = adapter.actions_released or adapter.actions
+            for i in range(FRAME_SKIP):
+                frame_count += 1
+                buttons = (adapter.actions if i < FRAME_SKIP // 2 else actions_released)[action_index]
+                obs, _, terminated, truncated, info = env.step(buttons)
+                done = terminated or truncated
 
-                # Grace period: eliminate repeat_state penalty for first 200 frames
-                # This encourages early exploration before agent gets stuck
-                if frame_count < 200 and reward == -0.05:
-                    reward = 0
+                # The adapter owns all game-specific reward shaping and
+                # termination (movement, kills, room/death handling, etc.).
+                frame_reward, adapter_done = adapter.step(info, frame_count)
+                reward += frame_reward
+                done = done or adapter_done
 
-                if info["Room"] != 116:
-                    reward = -100000
-                    done = True
-                total_rewards += reward
-                episode_reward += reward  # update reward for this episode
-                print("Total rewards:", total_rewards)
+                # Capture the frame and overlay episode information (only if recording).
+                if writer is not None:
+                    screen = env.em.get_screen()
+                    frame_bgr = cv2.cvtColor(screen, cv2.COLOR_RGB2BGR)
+                    overlay_text = f"Ep: {episode} | Frame: {frame_count} | Reward: {episode_reward + reward:.2f}"
 
-                next_state = preprocess_state(next_state)
+                    # Define font parameters.
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    font_scale = 0.3
+                    thickness = 1
 
-                # Train every 4 frames instead of every frame (4x speedup)
-                if frame_count % 4 == 0:
-                    loss = agent.train(state, action, reward, next_state, done)
-                    if loss is not None:
-                        episode_loss += loss
-                        training_steps += 1
+                    # Get the size of the text box.
+                    (text_width, text_height), baseline = cv2.getTextSize(overlay_text, font, font_scale, thickness)
 
-                state = next_state
+                    # Set the origin for the text.
+                    x, y = 10, text_height + 5
 
-            # Capture the frame and overlay the episode, frame count, and reward information (only if recording).
-            if writer is not None:
-                frame = env.em.get_screen()
-                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                overlay_text = f"Ep: {episode} | Frame: {frame_count} | Reward: {episode_reward}"
+                    # Draw a filled black rectangle as the background for the text.
+                    cv2.rectangle(frame_bgr, (x - 5, y - text_height - 5), (x + text_width + 5, y + baseline + 5), (0, 0, 0), cv2.FILLED)
 
-                # Define font parameters.
-                font = cv2.FONT_HERSHEY_SIMPLEX
-                font_scale = 0.3
-                thickness = 1
+                    # Put the white text on top.
+                    cv2.putText(frame_bgr, overlay_text, (x, y), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
 
-                # Get the size of the text box.
-                (text_width, text_height), baseline = cv2.getTextSize(overlay_text, font, font_scale, thickness)
+                    writer.write(frame_bgr)
 
-                # Set the origin for the text.
-                x, y = 10, text_height + 5
+                if done or frame_count >= args.max_frames:
+                    break
 
-                # Draw a filled black rectangle as the background for the text.
-                cv2.rectangle(frame_bgr, (x - 5, y - text_height - 5), (x + text_width + 5, y + baseline + 5), (0, 0, 0), cv2.FILLED)
+            total_rewards += reward
+            episode_reward += reward
 
-                # Put the white text on top.
-                cv2.putText(frame_bgr, overlay_text, (x, y), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+            next_frame = preprocess_frame(obs)
+            frame_stack.append(next_frame)
+            next_state = get_stacked_state(frame_stack)
 
-                writer.write(frame_bgr)
+            # Every decision transition is stored and trained on — nothing is dropped
+            loss = agent.train(state, action, reward, next_state, done)
+            if loss is not None:
+                episode_loss += loss
+                training_steps += 1
+
+            state = next_state
 
         if writer is not None:
             writer.release()
+        if hasattr(agent, 'flush_episode'):
+            agent.flush_episode()
         agent.update_epsilon()
 
         # Track episode performance
         episode_rewards.append(episode_reward)
         avg_loss = episode_loss / max(training_steps, 1)
 
-        # Calculate moving average over last 10 episodes
+        # Game-specific episode metrics (e.g. kills/cleared for Zelda)
+        stats = adapter.episode_stats()
+
+        # Calculate the reward moving average over the last 10 episodes
         window_size = min(10, len(episode_rewards))
         moving_avg = sum(episode_rewards[-window_size:]) / window_size
 
@@ -291,6 +366,9 @@ def main():
         print(f"{'='*60}")
         print(f"Episode Reward: {episode_reward:.2f}")
         print(f"Moving Avg (last {window_size}): {moving_avg:.2f}")
+        summary = adapter.summary_line()
+        if summary:
+            print(summary)
         print(f"Avg Loss: {avg_loss:.4f}")
         print(f"Epsilon: {agent.epsilon:.4f}")
         print(f"Frames: {frame_count}")
@@ -298,9 +376,20 @@ def main():
         print(f"Replay Buffer Size: {len(agent.memory)}")
         print(f"{'='*60}\n")
 
-        # Log stats to CSV
-        log_episode_stats(episode, episode_reward, moving_avg, avg_loss, agent.epsilon,
-                         frame_count, training_steps, len(agent.memory))
+        # Log stats to CSV (generic columns + the adapter's game-specific ones)
+        values = {
+            'episode': episode,
+            'episode_reward': f"{episode_reward:.2f}",
+            'moving_avg': f"{moving_avg:.2f}",
+            'avg_loss': f"{avg_loss:.4f}",
+            'epsilon': f"{agent.epsilon:.4f}",
+            'frames': frame_count,
+            'training_steps': training_steps,
+            'replay_buffer_size': len(agent.memory),
+            **stats,
+            'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        log_episode_stats(log_columns, values)
 
         # Save model if this is the best performance so far, or every 50 episodes
         if episode_reward > best_reward or episode % 50 == 0:

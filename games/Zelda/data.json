@@ -1,0 +1,176 @@
+{
+  "info": {
+    "Arrow": {
+      "address": 1625,
+      "type": "|u1"
+    },
+    "Backend Frame Count": {
+      "address": 21,
+      "type": "|u1"
+    },
+    "Bombs": {
+      "address": 1624,
+      "type": "|u1"
+    },
+    "Boomerang": {
+      "address": 1652,
+      "type": "|u1"
+    },
+    "Boomerang 2": {
+      "address": 1653,
+      "type": "|u1"
+    },
+    "Bow": {
+      "address": 1626,
+      "type": "|u1"
+    },
+    "Candle": {
+      "address": 1627,
+      "type": "|u1"
+    },
+    "Clock": {
+      "address": 1644,
+      "type": "|u1"
+    },
+    "Deaths": {
+      "address": 1584,
+      "type": "|u1"
+    },
+    "Enemies Killed": {
+      "address": 1322,
+      "type": "|u1"
+    },
+    "Enemies Killed Current Room": {
+      "address": 847,
+      "type": "|u1"
+    },
+    "Enemies Spawned In Room": {
+      "address": 846,
+      "type": "|u1"
+    },
+    "Enemy 1 HP": {
+      "address": 1158,
+      "type": "|u1"
+    },
+    "Enemy 2 HP": {
+      "address": 1159,
+      "type": "|u1"
+    },
+    "Enemy 3 HP": {
+      "address": 1160,
+      "type": "|u1"
+    },
+    "Enemy 4 HP": {
+      "address": 1161,
+      "type": "|u1"
+    },
+    "Enemy 5 HP": {
+      "address": 1162,
+      "type": "|u1"
+    },
+    "Enemy 6 HP": {
+      "address": 1163,
+      "type": "|u1"
+    },
+    "Flute": {
+      "address": 1628,
+      "type": "|u1"
+    },
+    "Food": {
+      "address": 1629,
+      "type": "|u1"
+    },
+    "Game Mode": {
+      "address": 18,
+      "type": "|u1"
+    },
+    "Game Paused": {
+      "address": 224,
+      "type": "|u1"
+    },
+    "Heart Containers": {
+      "address": 1647,
+      "type": "|u1"
+    },
+    "Hearts": {
+      "address": 1648,
+      "type": "|u1"
+    },
+    "Keys": {
+      "address": 1646,
+      "type": "|u1"
+    },
+    "Ladder": {
+      "address": 1635,
+      "type": "|u1"
+    },
+    "Letter": {
+      "address": 1638,
+      "type": "|u1"
+    },
+    "Level": {
+      "address": 16,
+      "type": "|u1"
+    },
+    "Link X": {
+      "address": 112,
+      "type": "|u1"
+    },
+    "Link Y": {
+      "address": 132,
+      "type": "|u1"
+    },
+    "Magic Book": {
+      "address": 1633,
+      "type": "|u1"
+    },
+    "Magical Key": {
+      "address": 1636,
+      "type": "|u1"
+    },
+    "Magical Rod": {
+      "address": 1631,
+      "type": "|u1"
+    },
+    "Potion": {
+      "address": 1630,
+      "type": "|u1"
+    },
+    "Power Bracelet": {
+      "address": 1637,
+      "type": "|u1"
+    },
+    "Raft": {
+      "address": 1632,
+      "type": "|u1"
+    },
+    "Ring": {
+      "address": 1634,
+      "type": "|u1"
+    },
+    "Room": {
+      "address": 235,
+      "type": "|u1"
+    },
+    "Rupees": {
+      "address": 1645,
+      "type": "|u1"
+    },
+    "Screen Scroll Direction": {
+      "address": 232,
+      "type": "|u1"
+    },
+    "Shield": {
+      "address": 1654,
+      "type": "|u1"
+    },
+    "Sword": {
+      "address": 1623,
+      "type": "|u1"
+    },
+    "Triforce Pieces": {
+      "address": 1649,
+      "type": "|u1"
+    }
+  }
+}
