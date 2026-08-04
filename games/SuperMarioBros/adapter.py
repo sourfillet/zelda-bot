@@ -21,6 +21,12 @@ data directory, not games/:
 
 Expected SHA1: facee9c577a5262dbe33ac4930bb0b58c8c037f7
 
+That is the hash of the ROM *without* its 16-byte iNES header, which is what
+retro compares against — `sha1sum rom.nes` on a headered dump will not match it
+and does not mean the ROM is wrong. To check by hand:
+
+    tail -c +17 rom.nes | sha1sum
+
 RAM variables come from retro's data.json:
     lives    ($75A, i1)  starts at 2 (i.e. 3 lives); scenario ends at -1
     levelLo  ($75C, i1)  world sub-level
@@ -190,13 +196,23 @@ class SuperMarioBrosAdapter(GameAdapter):
     def _x_position(info):
         """Screen scroll position as a single number.
 
-        retro's bundled scenario rewards raw `xscrollLo` deltas, which wrap
-        every 256 pixels and so score a wrap as a huge negative jump. Combining
-        the high and low bytes avoids that.
+        These are the screen-edge registers ($71A page / $71C offset), i.e. the
+        camera rather than Mario himself. The camera never scrolls left, so as a
+        progress signal it is monotonic within a life.
 
-        NOT yet verified against a recording — see games/Zelda/RAM_MAP.md for
-        why that matters here. Check it before trusting a training run:
-            python games/Zelda/ram_search.py  # same tool, --game aware work pending
+        retro's bundled scenario rewards raw `xscrollLo` deltas, which wrap every
+        256 pixels and so score a wrap as a huge negative jump. Combining the two
+        bytes avoids that.
+
+        Verified against a 3000-frame recording on Level1-1: `xscrollLo` wrapped
+        255->2 and 255->1 while `xscrollHi` incremented 0->1->2 on exactly those
+        frames, making the combined value continuous (+3) across each wrap.
+        Observed forward movement peaks at 3 px/frame, well inside
+        MAX_PLAUSIBLE_STEP.
+
+        The combined value does reset to 0 when a level restarts after a death,
+        roughly 100 frames after `lives` decrements. step() ends the episode on
+        the decrement, so that reset lands after the episode is already over.
         """
         return (info["xscrollHi"] << 8) | info["xscrollLo"]
 
