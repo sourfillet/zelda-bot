@@ -1,0 +1,5 @@
+# Development tooling. Not needed to train — install with:
+#     pip install -r requirements-dev.txt
+# Configuration for both lives in pyproject.toml.
+ruff==0.16.1
+mypy==2.3.0

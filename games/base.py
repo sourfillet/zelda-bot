@@ -15,17 +15,17 @@ class GameAdapter:
     """
 
     # retro integration name (must match this game's directory under games/)
-    name = None
+    name: str | None = None
     # default emulator start state when --state is not given
-    default_state = None
+    default_state: str | None = None
     # discrete action set: each entry is a retro MultiBinary button array, held
     # for the full frame-skip window
-    actions = []
+    actions: list[list[int]] = []
     # variant of `actions` used for the back half of the frame-skip window, to
     # re-trigger edge-triggered buttons. Falls back to `actions` (no release).
-    actions_released = None
+    actions_released: list[list[int]] | None = None
     # extra CSV columns this game contributes to training_log.csv
-    log_fields = []
+    log_fields: list[str] = []
 
     def reset(self):
         """Reset per-episode trackers. Called at the start of every episode."""

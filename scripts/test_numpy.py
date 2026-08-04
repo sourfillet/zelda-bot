@@ -1,7 +1,7 @@
-import tensorflow as tf
 import numpy as np
-from tensorflow.keras.models import Sequential
+import tensorflow as tf
 from tensorflow.keras.layers import Dense
+from tensorflow.keras.models import Sequential
 
 print("Eager execution:", tf.executing_eagerly())
 

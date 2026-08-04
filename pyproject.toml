@@ -1,0 +1,55 @@
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+# archive/ is the pre-gym-retro Nintaco backend, kept for reference only.
+# zelda_env/ and .venv/ are virtualenvs that happen to live in the tree.
+exclude = ["archive", "zelda_env", ".venv", "saved_models", "recordings", "runs", "ram_dumps"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes: undefined names, unused imports/variables
+    "I",    # isort: import ordering
+    "B",    # flake8-bugbear: likely bugs
+    "C4",   # flake8-comprehensions
+    "UP",   # pyupgrade: outdated syntax for the target version
+    "SIM",  # flake8-simplify
+    "RET",  # flake8-return
+    "NPY",  # numpy-specific rules (legacy random, deprecated aliases)
+]
+ignore = [
+    "E501",    # line length: handled by the formatter, not worth churning docstrings over
+    "NPY002",  # legacy np.random.* -> Generator. Migrating would change the RNG
+               # stream and therefore every training run's trajectory, so it is a
+               # behavioural change, not a lint fix. Left for a deliberate PR.
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Reward/RAM tables read better aligned in columns than reflowed.
+"games/Zelda/adapter.py" = ["E241"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["main.py", "games", "models", "scripts"]
+exclude = "(archive|zelda_env|\\.venv)/"
+# The repo root has a vestigial empty __init__.py, which otherwise makes mypy
+# read the root as a package literally named "zelda-bot" and refuse to run.
+# Treating the root as the package base makes main.py a top-level module.
+explicit_package_bases = true
+mypy_path = "."
+
+# This is a numeric codebase with no annotations yet, so the value here is in
+# catching real mistakes -- typos, bad attribute access, unreachable branches --
+# not in enforcing full coverage. Untyped function bodies are still checked.
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_unreachable = true
+no_implicit_optional = true
+show_error_codes = true
+
+# Neither stable-retro, TensorFlow, OpenCV nor Keras ship usable stubs.
+[[tool.mypy.overrides]]
+module = ["retro.*", "tensorflow.*", "keras.*", "cv2.*"]
+ignore_missing_imports = true

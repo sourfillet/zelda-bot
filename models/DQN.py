@@ -1,10 +1,12 @@
-import numpy as np
-import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Flatten, Conv2D
-from tensorflow.keras.optimizers import Adam
 import random
 from collections import deque
+
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.layers import Conv2D, Dense, Flatten
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.optimizers import Adam
+
 
 class DQNAgent:
     def __init__(self, input_shape, action_size, learning_rate, discount_factor,
@@ -18,7 +20,7 @@ class DQNAgent:
         self.epsilon_min = epsilon_min
 
         # Experience Replay parameters
-        self.memory = deque(maxlen=20000)
+        self.memory: deque = deque(maxlen=20000)
         self.batch_size = 32
         self.train_start = 32  # Begin training only when memory has at least this many samples.
 

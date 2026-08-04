@@ -1,10 +1,11 @@
+from collections import deque
+
+import keras
 import numpy as np
 import tensorflow as tf
-import keras
-from tensorflow.keras.layers import Input, Conv2D, Flatten, Dense
+from tensorflow.keras.layers import Conv2D, Dense, Flatten, Input
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
-from collections import deque
 
 
 class SumTree:
@@ -119,8 +120,7 @@ class PrioritizedReplayBuffer:
             indices.append(idx)
             priorities.append(max(priority, self.epsilon))
 
-        priorities = np.array(priorities, dtype=np.float64)
-        sampling_probs = priorities / self.tree.total
+        sampling_probs = np.array(priorities, dtype=np.float64) / self.tree.total
         is_weights = (len(self) * sampling_probs) ** (-self.beta)
         is_weights /= is_weights.max()
 
@@ -129,7 +129,7 @@ class PrioritizedReplayBuffer:
 
     def update_priorities(self, indices, td_errors):
         """Recompute priorities from TD errors and update the SumTree."""
-        for idx, td_error in zip(indices, td_errors):
+        for idx, td_error in zip(indices, td_errors, strict=False):
             err = abs(float(td_error))
             # Guard: a non-finite TD error (inf/NaN from Q-value overflow) must
             # not corrupt the tree. Fall back to the current max priority so the
@@ -174,7 +174,7 @@ class RainbowDQNAgent:
 
         # n-step return accumulator (one deque per episode; cleared on done)
         self.n_step = 3
-        self.n_step_buffer = deque()
+        self.n_step_buffer: deque = deque()
 
         # Soft target update coefficient (Polyak)
         self.tau = 0.0005
@@ -242,7 +242,7 @@ class RainbowDQNAgent:
 
     def _soft_update_target(self):
         """Polyak averaging: target = tau * main + (1 - tau) * target."""
-        for main_w, target_w in zip(self.model.weights, self.target_model.weights):
+        for main_w, target_w in zip(self.model.weights, self.target_model.weights, strict=False):
             target_w.assign(self.tau * main_w + (1.0 - self.tau) * target_w)
 
     # ------------------------------------------------------------------

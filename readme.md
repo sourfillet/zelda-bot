@@ -77,6 +77,16 @@ To confirm the GPU is visible to Tensorflow:
 
     python scripts/gputest.py
 
+### Linting
+
+Ruff and Mypy are configured in `pyproject.toml`. They aren't needed to train, so they live in a separate requirements file:
+
+    pip install -r requirements-dev.txt
+    ruff check .          # add --fix to apply the safe fixes
+    mypy
+
+Mypy runs in a deliberately permissive mode: this is numeric code with no annotations, so the aim is to catch real mistakes (typos, bad attribute access, unreachable branches) rather than to enforce full type coverage. `NPY002` is switched off in Ruff on purpose — migrating `np.random.*` to `Generator` would change the RNG stream and therefore every training trajectory, which is a behavioural change rather than a lint fix.
+
 ### Training the models
 
 Once gym-retro is set up and the game is integrated, you can train the models by running main.py:

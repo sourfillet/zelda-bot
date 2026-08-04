@@ -1,19 +1,20 @@
-import retro
-import random
-import numpy as np
-import cv2
 import argparse
-import json
-import os
+import csv
 import datetime
 import glob
-import csv
-import tensorflow as tf
+import json
+import os
 from collections import deque
-from models.DQN import DQNAgent
-from models.DoubleDQN import DoubleDQNAgent
-from models.RainbowDQN import RainbowDQNAgent
+
+import cv2
+import numpy as np
+import retro
+import tensorflow as tf  # noqa: F401  (kept for the debug switches below)
+
 from games import load_adapter
+from models.DoubleDQN import DoubleDQNAgent
+from models.DQN import DQNAgent
+from models.RainbowDQN import RainbowDQNAgent
 
 # Debug mode disabled for performance - uncomment only when debugging specific issues
 # tf.config.run_functions_eagerly(True)
@@ -52,7 +53,7 @@ def load_config(config_file):
     Load configuration parameters from a JSON file.
     """
     if os.path.exists(config_file):
-        with open(config_file, 'r') as f:
+        with open(config_file) as f:
             return json.load(f)
     else:
         print(f"Config file {config_file} not found. Using default parameters.")
@@ -124,9 +125,9 @@ def get_video_writer(episode, frame_size, fps=30):
 
     video_path = os.path.join(run_dir, f"episode_{episode}.avi")
 
-    fourcc = cv2.VideoWriter_fourcc(*'XVID')
-    writer = cv2.VideoWriter(video_path, fourcc, fps, frame_size)
-    return writer
+    # opencv-python's bundled stubs omit VideoWriter_fourcc; it exists at runtime.
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')  # type: ignore[attr-defined]
+    return cv2.VideoWriter(video_path, fourcc, fps, frame_size)
 
 def integrate(game, state=retro.State.DEFAULT):
     """
@@ -137,8 +138,7 @@ def integrate(game, state=retro.State.DEFAULT):
     retro.data.Integrations.add_custom_path(games_path)
     available = retro.data.list_games(inttype=retro.data.Integrations.ALL)
     print(f"{game} in integrations:", game in available)
-    env = retro.make(game, state=state, inttype=retro.data.Integrations.ALL)
-    return env
+    return retro.make(game, state=state, inttype=retro.data.Integrations.ALL)
 
 def save_model(agent, episode, model_dir="saved_models"):
     """
@@ -221,7 +221,9 @@ def main():
     log_columns = BASE_LOG_COLUMNS + list(adapter.log_fields) + ['timestamp']
     total_rewards = 0
 
-    # Initialize the agent
+    # Initialize the agent. RainbowDQNAgent is a separate implementation rather
+    # than a DQNAgent subclass, so the union spells out what main.py drives.
+    agent: DQNAgent | RainbowDQNAgent
     if args.model == 'DQN':
         agent = DQNAgent(INPUT_SHAPE, action_size, args.learning_rate,
                          args.discount_factor, args.epsilon, args.epsilon_decay, args.epsilon_min)

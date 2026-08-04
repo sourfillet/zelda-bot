@@ -291,7 +291,7 @@ def cmd_correlate(args):
 
     rows.sort(reverse=True)
     print(f"{'addr':>6} {'hex':>6} {'prec':>6} {'recall':>6} {'chgs':>6}  known-as")
-    for f1, prec, rec, addr, total in rows[:args.top]:
+    for _f1, prec, rec, addr, total in rows[:args.top]:
         print(f"{addr:>6} {addr:>#6x} {prec:>6.2f} {rec:>6.2f} {total:>6}  {annotate(addr)}")
     if not rows:
         print("Nothing matched — loosen --min-recall/--min-precision or widen --window.")
