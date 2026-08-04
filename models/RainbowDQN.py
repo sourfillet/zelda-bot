@@ -271,26 +271,34 @@ class RainbowDQNAgent:
     def _store_n_step(self):
         """
         Pop the oldest transition from n_step_buffer, compute the discounted
-        n-step return, and store (s_t, a_t, R_n, s_{t+n}, done_n) in the
+        n-step return, and store (s_t, a_t, R_n, s_{t+n}, done_n, steps) in the
         prioritized replay buffer.
 
         Stops reward accumulation early if a done=True is encountered within
         the window, correctly handling episode boundaries.
+
+        `steps` is how many rewards actually went into R_n, which is not always
+        n_step: flushing at the end of an episode drains partial windows of
+        length n_step-1, n_step-2, ... Those transitions bootstrap from a state
+        that is `steps` frames ahead, not n_step, so train() has to discount
+        each sample by gamma**steps individually.
         """
         buf = list(self.n_step_buffer)
         R_n = 0.0
         final_ns = buf[-1][3]
         done_n = buf[-1][4]
+        steps = len(buf)
 
         for i, (_, _, r, ns, d) in enumerate(buf):
             R_n += (self.discount_factor ** i) * r
             if d:
                 final_ns = ns
                 done_n = True
+                steps = i + 1
                 break
 
         s_t, a_t = buf[0][0], buf[0][1]
-        self.memory.add((s_t, a_t, R_n, final_ns, done_n))
+        self.memory.add((s_t, a_t, R_n, final_ns, done_n, steps))
         self.n_step_buffer.popleft()
 
     # ------------------------------------------------------------------
@@ -342,6 +350,9 @@ class RainbowDQNAgent:
         actions = [t[1] for t in batch]
         rewards = np.array([t[2] for t in batch], dtype=np.float32)
         dones = np.array([t[4] for t in batch], dtype=np.float32)
+        # Per-sample window length; partial windows flushed at episode end are
+        # shorter than n_step and must not be discounted as if they were full.
+        n_steps = np.array([t[5] for t in batch], dtype=np.float32)
 
         # Current Q-values (reference for building the full target vector)
         current_q = self.model(states, training=False).numpy()
@@ -350,7 +361,7 @@ class RainbowDQNAgent:
         # ... evaluate that action with the target network
         target_q_next = self.target_model(next_states, training=False).numpy()
 
-        gamma_n = self.discount_factor ** self.n_step
+        gamma_n = self.discount_factor ** n_steps
         targets = current_q.copy()
         td_errors = np.zeros(self.batch_size, dtype=np.float32)
 
@@ -359,7 +370,7 @@ class RainbowDQNAgent:
                 target_val = rewards[i]
             else:
                 best_action = int(np.argmax(main_q_next[i]))
-                target_val = rewards[i] + gamma_n * target_q_next[i][best_action]
+                target_val = rewards[i] + gamma_n[i] * target_q_next[i][best_action]
             td_errors[i] = abs(target_val - current_q[i][actions[i]])
             targets[i][actions[i]] = target_val
 
