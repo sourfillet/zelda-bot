@@ -1,16 +1,25 @@
-zelda_env
-archive
-Zelda/rom.nes
-Zelda/test
-Zelda/monsters.state
+# --- Game assets -------------------------------------------------------------
+# ROMs are NEVER committed. Patterns are per-game globs, not literal paths, so
+# they keep matching when a game directory is added or moved under games/.
+games/*/rom.nes
+games/*/*.nes
+games/*/test/
+
+# --- Generated output --------------------------------------------------------
 saved_models/*
 recordings/*
 runs/*
-training_log.csv
-cuda-keyring_1.0-1_all.deb
-scripts/__pycache__/gputest.cpython-38.pyc
-scripts/__pycache__/gputest.cpython-310.pyc
-__pycache__
-.python_version
+ram_dumps/
+# training_log.csv plus the *_legacy.csv files main.py rotates it into
+training_log*.csv
+
+# --- Environments and caches -------------------------------------------------
+zelda_env
 .venv/*
-models/__pycache__/DQN.cpython*
+.python_version
+__pycache__/
+*.py[cod]
+
+# --- Misc --------------------------------------------------------------------
+archive
+cuda-keyring_1.0-1_all.deb
