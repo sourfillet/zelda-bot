@@ -75,7 +75,10 @@ def parse_arguments():
         description="Train a DQN agent on a retro game environment"
     )
     parser.add_argument('--config', type=str, default='modelargs.json', help="Path to config file")
-    parser.add_argument('--state', type=str, default=config_defaults.get('state'),
+    # Defaults to None for the same reason as --epsilon: a state named in the
+    # config file belongs to whichever game that config was written for, so it
+    # can be overridden when --game changes. An explicit --state cannot.
+    parser.add_argument('--state', type=str, default=None,
                         help="Name of the state to start in (defaults to the game's default state)")
     parser.add_argument('--model', type=str, default=config_defaults.get('model', 'DQN'),
                         help='Model to use: DQN, DoubleDQN, RainbowDQN')
@@ -104,10 +107,14 @@ def parse_arguments():
                         help='Record video every N episodes (default: 25)')
     args = parser.parse_args()
 
-    # Resolve the epsilon sentinel, remembering whether it was set on the CLI.
+    # Resolve the sentinels, remembering which were set on the CLI.
     args.epsilon_from_cli = args.epsilon is not None
     if args.epsilon is None:
         args.epsilon = config_defaults.get('epsilon', 1.0)
+
+    args.state_from_cli = args.state is not None
+    if args.state is None:
+        args.state = config_defaults.get('state')
     return args
 
 def get_video_writer(episode, frame_size, fps=30):
@@ -129,13 +136,51 @@ def get_video_writer(episode, frame_size, fps=30):
     fourcc = cv2.VideoWriter_fourcc(*'XVID')  # type: ignore[attr-defined]
     return cv2.VideoWriter(video_path, fourcc, fps, frame_size)
 
-def integrate(game, state=retro.State.DEFAULT):
+def register_integrations():
     """
-    Integrate a custom game environment (games/<game>/) into the Retro data set.
+    Make games/ visible to retro, alongside its own bundled integrations.
+    Safe to call more than once.
     """
     games_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "games")
     print("Games path: ", games_path)
     retro.data.Integrations.add_custom_path(games_path)
+    return games_path
+
+def resolve_state(game, state, default_state, from_cli):
+    """
+    Pick a start state that actually exists for `game`.
+
+    modelargs.json carries a `state` belonging to whichever game it was last
+    used with, so changing --game without editing the config would otherwise
+    ask retro for (say) Zelda's "monsters" state while loading Mario. retro
+    reports that as a TypeError from gzip.open(None), which says nothing useful,
+    so resolve it here instead.
+
+    An explicit --state that does not exist is an error. One inherited from the
+    config file just falls back to the game's own default.
+    """
+    available = retro.data.list_states(game, inttype=retro.data.Integrations.ALL)
+    if state in available:
+        return state
+
+    if from_cli:
+        raise SystemExit(
+            f"State {state!r} does not exist for {game}.\n"
+            f"Available states: {', '.join(sorted(available)) or '(none found)'}"
+        )
+
+    print(f"Config state {state!r} is not a {game} state — using {default_state!r} instead.")
+    if default_state not in available:
+        raise SystemExit(
+            f"Default state {default_state!r} does not exist for {game} either.\n"
+            f"Available states: {', '.join(sorted(available)) or '(none found)'}"
+        )
+    return default_state
+
+def integrate(game, state=retro.State.DEFAULT):
+    """
+    Build the retro environment for `game`. Call register_integrations() first.
+    """
     available = retro.data.list_games(inttype=retro.data.Integrations.ALL)
     print(f"{game} in integrations:", game in available)
     return retro.make(game, state=state, inttype=retro.data.Integrations.ALL)
@@ -215,9 +260,15 @@ def main():
     # Load the game adapter (action set, reward shaping, termination, metrics).
     # It also resolves the start state, falling back to the game's default.
     adapter = load_adapter(args.game, args.state)
-    state_name = adapter.state if hasattr(adapter, 'state') else args.state
     # integration_name, not args.game: retro's bundled integrations are named
     # "<Game>-<Platform>", which cannot double as a Python package name.
+    register_integrations()
+    state_name = resolve_state(adapter.integration_name,
+                               getattr(adapter, 'state', args.state),
+                               adapter.default_state,
+                               args.state_from_cli)
+    # Keep the adapter in step; Zelda reads self.state for its dungeon check.
+    adapter.state = state_name
     env = integrate(adapter.integration_name, state_name)
     action_size = len(adapter.actions)
     log_columns = BASE_LOG_COLUMNS + list(adapter.log_fields) + ['timestamp']
