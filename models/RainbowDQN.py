@@ -7,7 +7,6 @@ from tensorflow.keras.layers import Conv2D, Dense, Flatten, Input
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
 
-
 # Ceiling on any single transition's priority.
 #
 # Without it, one large TD error takes almost the whole tree: alpha=0.6 turns an
