@@ -8,6 +8,17 @@ from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
 
 
+# Ceiling on any single transition's priority.
+#
+# Without it, one large TD error takes almost the whole tree: alpha=0.6 turns an
+# error of 1e8 into a priority of 63,096, which is 99.9% of the sampling mass in
+# a buffer whose other entries sit near 1. Every batch then collapses onto that
+# one transition, its Q-value runs away, its error grows, and its priority grows
+# with it. Paradoxically it is a *good* episode that triggers this — novel
+# high-reward states are exactly the ones with large TD errors.
+MAX_PRIORITY = 10.0
+
+
 class SumTree:
     """
     Binary SumTree for O(log n) priority updates and proportional sampling.
@@ -136,9 +147,12 @@ class PrioritizedReplayBuffer:
             # transition is still sampled frequently until a valid error is computed.
             if not np.isfinite(err):
                 err = self._max_priority ** (1.0 / self.alpha)
-            priority = (err + self.epsilon) ** self.alpha
+            # Clamp here as well as on _max_priority below: _max_priority only
+            # governs the priority given to *newly added* transitions, so
+            # without this the tree itself is unbounded.
+            priority = min((err + self.epsilon) ** self.alpha, MAX_PRIORITY)
             self.tree.update(idx, priority)
-            self._max_priority = min(max(self._max_priority, priority), 10.0)
+            self._max_priority = min(max(self._max_priority, priority), MAX_PRIORITY)
 
 
 class RainbowDQNAgent:
