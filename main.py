@@ -4,6 +4,7 @@ import datetime
 import glob
 import json
 import os
+import sys
 from collections import deque
 
 import cv2
@@ -136,24 +137,97 @@ def parse_arguments():
         args.state = config_defaults.get('state')
     return args
 
-def get_video_writer(episode, frame_size, fps=30):
+def get_video_writer(episode, frame_size, run_dir, fps=30):
     """
-    Create a VideoWriter to record footage of an episode.
+    Create a VideoWriter for one episode inside this run's recordings folder.
+
+    The directory is the run's, not a fresh timestamped one per episode — doing
+    the latter produced 233 directories holding a single file each.
     """
-    recordings_dir = "recordings"
-    if not os.path.exists(recordings_dir):
-        os.makedirs(recordings_dir)
-
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    run_dir = os.path.join(recordings_dir, timestamp)
-    if not os.path.exists(run_dir):
-        os.makedirs(run_dir)
-
-    video_path = os.path.join(run_dir, f"episode_{episode}.avi")
+    video_path = os.path.join(run_dir, "recordings", f"episode{episode:04d}.avi")
 
     # opencv-python's bundled stubs omit VideoWriter_fourcc; it exists at runtime.
     fourcc = cv2.VideoWriter_fourcc(*'XVID')  # type: ignore[attr-defined]
     return cv2.VideoWriter(video_path, fourcc, fps, frame_size)
+
+RUNS_ROOT = "runs"
+
+def create_run_dir(game, model, state, root=RUNS_ROOT):
+    """
+    Make runs/<game>/<timestamp>__<model>__<state>/ with its subfolders.
+
+    Everything one run produces lives together: its own training_log.csv, its
+    checkpoints, its recordings and the config that produced them. Previously
+    checkpoints from every game and every run shared one flat directory, so a
+    file could not be traced back to the run — or even the game — that made it.
+    """
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join(root, game, f"{stamp}__{model}__{state}")
+    os.makedirs(os.path.join(run_dir, "checkpoints"), exist_ok=True)
+    os.makedirs(os.path.join(run_dir, "recordings"), exist_ok=True)
+    return run_dir
+
+def _git_commit():
+    """Short commit hash, or None outside a git checkout."""
+    try:
+        import subprocess
+        return subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                              capture_output=True, text=True, timeout=5,
+                              check=True).stdout.strip()
+    except Exception:
+        return None
+
+def write_run_config(run_dir, args, adapter, action_size, state):
+    """
+    Snapshot everything needed to interpret or reproduce this run.
+
+    Without this a training curve is uninterpretable after the fact — there is
+    no record of which learning rate, epsilon schedule or reward table produced
+    it, which is what made comparing runs guesswork.
+    """
+    config = {
+        "started": datetime.datetime.now().isoformat(timespec="seconds"),
+        "git_commit": _git_commit(),
+        "game": args.game,
+        "retro_name": adapter.integration_name,
+        "state": state,
+        "model": args.model,
+        "action_size": action_size,
+        "input_shape": list(INPUT_SHAPE),
+        "frame_skip": FRAME_SKIP,
+        "args": dict(vars(args)),
+    }
+    rewards = getattr(sys.modules[adapter.__module__], "REWARD_VALUES", None)
+    if isinstance(rewards, dict):
+        config["reward_values"] = rewards
+    with open(os.path.join(run_dir, "config.json"), "w") as f:
+        json.dump(config, f, indent=2)
+    return config
+
+def append_run_index(run_dir, config, root=RUNS_ROOT):
+    """Register the run in runs/index.csv so runs are discoverable in one place."""
+    index = os.path.join(root, "index.csv")
+    columns = ["started", "game", "model", "state", "num_episodes", "git_commit", "run_dir"]
+    exists = os.path.exists(index)
+    with open(index, "a", newline="") as f:
+        writer = csv.writer(f)
+        if not exists:
+            writer.writerow(columns)
+        writer.writerow([config["started"], config["game"], config["model"], config["state"],
+                         config["args"].get("num_episodes"), config["git_commit"], run_dir])
+
+def update_run_summary(run_dir, episode, episode_reward, best_reward, max_abs_q, stats):
+    """Rewrite this run's summary.json — cheap, and survives an interrupted run."""
+    summary = {
+        "updated": datetime.datetime.now().isoformat(timespec="seconds"),
+        "episodes_completed": episode + 1,
+        "last_episode_reward": round(float(episode_reward), 3),
+        "best_episode_reward": round(float(best_reward), 3),
+        "last_max_abs_q": float(max_abs_q),
+        "last_stats": stats,
+    }
+    with open(os.path.join(run_dir, "summary.json"), "w") as f:
+        json.dump(summary, f, indent=2)
 
 def register_integrations():
     """
@@ -204,17 +278,21 @@ def integrate(game, state=retro.State.DEFAULT):
     print(f"{game} in integrations:", game in available)
     return retro.make(game, state=state, inttype=retro.data.Integrations.ALL)
 
-def save_model(agent, episode, model_dir="saved_models"):
+def save_model(agent, episode, run_dir, is_best=False):
     """
-    Save the model to a unique file within model_dir.
-    The filename includes the agent's class name, episode number, and a timestamp.
+    Save a checkpoint into this run's checkpoints/ folder.
+
+    Episode number alone names the file — the run directory already carries the
+    game, model, state and timestamp, so none of that needs encoding here. A new
+    best also refreshes best.keras, so recovering the best network never means
+    reading the log to work out which episode it was.
     """
-    if not os.path.exists(model_dir):
-        os.makedirs(model_dir)
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{agent.__class__.__name__}_episode{episode}_{timestamp}.keras"
-    model_path = os.path.join(model_dir, filename)
+    ckpt_dir = os.path.join(run_dir, "checkpoints")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    model_path = os.path.join(ckpt_dir, f"episode{episode:04d}.keras")
     agent.model.save(model_path)
+    if is_best:
+        agent.model.save(os.path.join(ckpt_dir, "best.keras"))
     print("Model saved at:", model_path)
     return model_path
 
@@ -252,22 +330,29 @@ def log_episode_stats(columns, values, log_file="training_log.csv"):
             writer.writerow(columns)
         writer.writerow([values[c] for c in columns])
 
-def load_model_into_agent(agent, model_dir="saved_models", model_file=None):
+def find_latest_checkpoint(game, root=RUNS_ROOT):
+    """
+    Newest checkpoint belonging to `game`, across that game's previous runs.
+
+    Scoped to the game deliberately. Checkpoints used to share one flat folder
+    with the game absent from the filename, so "latest" could hand a Mario
+    network (8 actions) to a Zelda run (10) purely because it was written more
+    recently.
+    """
+    pattern = os.path.join(root, game, "*", "checkpoints", "*.keras")
+    files = [f for f in glob.glob(pattern) if os.path.basename(f) != "best.keras"]
+    if not files:
+        return None
+    return max(files, key=os.path.getctime)
+
+def load_model_into_agent(agent, model_file):
     """
     Load weights from a saved model file into the agent's existing model.
     Supports .keras (preferred) and legacy .h5 files.
-    If model_file is not provided, the most recent file is loaded.
 
     Loads weights only (not the full model graph) so the agent retains its
     current compile settings — loss function, optimizer, clipnorm, etc.
     """
-    if model_file is None:
-        files = (glob.glob(os.path.join(model_dir, "*.keras")) +
-                 glob.glob(os.path.join(model_dir, "*.h5")))
-        if not files:
-            print("No model files found in", model_dir)
-            return None
-        model_file = max(files, key=os.path.getctime)
     agent.model.load_weights(model_file)
     print("Model loaded from:", model_file)
     return model_file
@@ -296,6 +381,17 @@ def main():
     log_columns = BASE_LOG_COLUMNS + list(adapter.log_fields) + ['timestamp']
     total_rewards = 0
 
+    # Everything this run produces goes in one directory.
+    run_dir = create_run_dir(args.game, args.model, state_name)
+    run_config = write_run_config(run_dir, args, adapter, action_size, state_name)
+    append_run_index(run_dir, run_config)
+    # --log_file only overrides when explicitly given; otherwise the log belongs
+    # to the run, which is what makes it analysable without splitting on episode
+    # counter resets.
+    log_path = (args.log_file if args.log_file != 'training_log.csv'
+                else os.path.join(run_dir, 'training_log.csv'))
+    print(f"Run directory: {run_dir}")
+
     # Initialize the agent. RainbowDQNAgent is a separate implementation rather
     # than a DQNAgent subclass, so the union spells out what main.py drives.
     agent: DQNAgent | RainbowDQNAgent
@@ -314,9 +410,15 @@ def main():
     # Load a pre-trained model ONCE at startup if requested
     if args.load_model:
         if args.load_model == "latest":
-            load_model_into_agent(agent)
+            checkpoint = find_latest_checkpoint(args.game)
+            if checkpoint is None:
+                raise SystemExit(
+                    f"No previous checkpoint found for {args.game} under {RUNS_ROOT}/{args.game}/. "
+                    "Pass an explicit path, or start without --load_model."
+                )
         else:
-            load_model_into_agent(agent, model_file=args.load_model)
+            checkpoint = args.load_model
+        load_model_into_agent(agent, checkpoint)
         # Sync target network to the loaded weights so Bellman targets are correct immediately
         agent.update_target_model()
         # Resume with minimal exploration unless the caller explicitly passed --epsilon
@@ -348,7 +450,7 @@ def main():
         if episode % args.record_freq == 0:
             screen = env.em.get_screen()
             height, width, channels = screen.shape
-            writer = get_video_writer(episode, (width, height), fps=30)
+            writer = get_video_writer(episode, (width, height), run_dir, fps=30)
 
         frame_count = 0  # Frame counter for this episode
         episode_loss = 0  # Track total loss for this episode
@@ -482,14 +584,17 @@ def main():
             **stats,
             'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
-        log_episode_stats(log_columns, values, log_file=args.log_file)
+        log_episode_stats(log_columns, values, log_file=log_path)
 
         # Save model if this is the best performance so far, or every 50 episodes
-        if episode_reward > best_reward or episode % 50 == 0:
-            if episode_reward > best_reward:
+        is_best = episode_reward > best_reward
+        if is_best or episode % 50 == 0:
+            if is_best:
                 best_reward = episode_reward
                 print(f"New best reward: {best_reward:.2f} - Saving model!")
-            save_model(agent, episode)
+            save_model(agent, episode, run_dir, is_best=is_best)
+
+        update_run_summary(run_dir, episode, episode_reward, best_reward, max_abs_q, stats)
 
 if __name__ == "__main__":
     main()

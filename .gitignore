@@ -6,11 +6,15 @@ games/*/*.nes
 games/*/test/
 
 # --- Generated output --------------------------------------------------------
+# runs/<game>/<timestamp>__<model>__<state>/ holds everything one run produces:
+# config.json, training_log.csv, checkpoints/, recordings/, summary.json.
+runs/
+ram_dumps/
+# Pre-reorganisation layout, plus the archived logs from it.
 saved_models/*
 recordings/*
-runs/*
-ram_dumps/
-# training_log.csv plus the *_legacy.csv files main.py rotates it into
+legacy/
+# training_log.csv plus the *_legacy_<timestamp>.csv files main.py rotates into
 training_log*.csv
 
 # --- Environments and caches -------------------------------------------------

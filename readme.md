@@ -111,19 +111,19 @@ Configuration settings can be set either in modelargs.json or on the command lin
 * **load_model**: `latest`, or a path to a specific checkpoint. See below.
 * **record_freq**: record a video of every Nth episode. Defaults to 25.
 
-Note that the model will be saved under the directory ./saved_models, and per-episode stats are appended to training_log.csv.
+Each run gets its own directory under `runs/<game>/<timestamp>__<model>__<state>/` holding its checkpoints, recordings, per-episode `training_log.csv`, and a `config.json` recording exactly which arguments produced it. `runs/index.csv` lists every run.
 
 ### Loading models
 
 To start fresh training without loading any model, just leave `--load_model` off.
 
-To resume from the most recent saved model:
+To resume from the most recent checkpoint for the current game:
 
     python main.py --config modelargs.json --load_model latest
 
 To load a specific model file:
 
-    python main.py --config modelargs.json --load_model saved_models/RainbowDQNAgent_episode100_20260304_114032.keras
+    python main.py --config modelargs.json --load_model runs/Zelda/20260805_140619__RainbowDQN__monsters/checkpoints/best.keras
 
 Checkpoints are saved as `.keras`; older `.h5` files still load. Resuming drops epsilon to `epsilon_min` so the agent exploits what it already learned instead of re-exploring from scratch — pass `--epsilon` explicitly if you want to override that.
 
