@@ -200,6 +200,13 @@ class RainbowDQNAgent:
         # Hard-copy weights to initialize target network
         self.target_model.set_weights(self.model.get_weights())
 
+        # Compiled graphs for the two hot paths. Both are built once here and
+        # capture the variable objects directly; load_weights() and
+        # set_weights() assign into those same variables, so the captured
+        # references stay valid afterwards.
+        self._train_step = self._build_train_step()
+        self._soft_update = self._build_soft_update()
+
     # ------------------------------------------------------------------
     # Network construction
     # ------------------------------------------------------------------
@@ -241,6 +248,49 @@ class RainbowDQNAgent:
         )
         return model
 
+    def _build_train_step(self):
+        """
+        Compile one gradient step into a tf.function.
+
+        Keras `fit()` rebuilds its data adapters, callback list and metric state
+        on every call, which costs ~4x more than the gradient computation itself
+        when the batch is this small and the call happens once per decision.
+        This is the same update — same Huber loss, same optimizer (so `clipnorm`
+        still applies inside apply_gradients), same importance weights.
+        """
+        model = self.model
+        optimizer = model.optimizer
+        loss_fn = tf.keras.losses.Huber(delta=2.0)
+
+        @tf.function(reduce_retracing=True)
+        def train_step(states, targets, weights):
+            with tf.GradientTape() as tape:
+                predictions = model(states, training=True)
+                loss = loss_fn(targets, predictions, sample_weight=weights)
+            grads = tape.gradient(loss, model.trainable_variables)
+            optimizer.apply_gradients(zip(grads, model.trainable_variables, strict=True))
+            return loss
+
+        return train_step
+
+    def _build_soft_update(self):
+        """
+        Compile the Polyak update into a single graph.
+
+        Done eagerly this is a Python loop issuing one tiny assign per weight
+        tensor, every training step. Traced once, it becomes one graph call.
+        """
+        tau = tf.constant(self.tau, dtype=tf.float32)
+        main_weights = self.model.weights
+        target_weights = self.target_model.weights
+
+        @tf.function(reduce_retracing=True)
+        def soft_update():
+            for main_w, target_w in zip(main_weights, target_weights, strict=False):
+                target_w.assign(tau * main_w + (1.0 - tau) * target_w)
+
+        return soft_update
+
     # ------------------------------------------------------------------
     # Target network update
     # ------------------------------------------------------------------
@@ -255,8 +305,7 @@ class RainbowDQNAgent:
 
     def _soft_update_target(self):
         """Polyak averaging: target = tau * main + (1 - tau) * target."""
-        for main_w, target_w in zip(self.model.weights, self.target_model.weights, strict=False):
-            target_w.assign(self.tau * main_w + (1.0 - self.tau) * target_w)
+        self._soft_update()
 
     # ------------------------------------------------------------------
     # Action selection
@@ -367,11 +416,17 @@ class RainbowDQNAgent:
         # shorter than n_step and must not be discounted as if they were full.
         n_steps = np.array([t[5] for t in batch], dtype=np.float32)
 
-        # Current Q-values (reference for building the full target vector)
-        current_q = self.model(states, training=False).numpy()
-        # Double DQN: select best action with main network ...
-        main_q_next = self.model(next_states, training=False).numpy()
-        # ... evaluate that action with the target network
+        # Both main-network passes go through as a single batch: one call of
+        # 2*batch_size instead of two of batch_size. The GPU is nowhere near
+        # saturated at this size, so the larger call costs barely more than the
+        # smaller one and saves an entire round trip.
+        combined = self.model(np.concatenate([states, next_states], axis=0),
+                              training=False).numpy()
+        # Current Q-values (reference for building the full target vector) ...
+        current_q = combined[:self.batch_size]
+        # ... and Double DQN action selection from the same forward pass.
+        main_q_next = combined[self.batch_size:]
+        # The target network evaluates that action; separate model, separate call.
         target_q_next = self.target_model(next_states, training=False).numpy()
 
         gamma_n = self.discount_factor ** n_steps
@@ -390,18 +445,19 @@ class RainbowDQNAgent:
         # Refresh priorities before the gradient step
         self.memory.update_priorities(indices, td_errors)
 
-        # Fit; IS weights correct for the non-uniform sampling distribution
-        history = self.model.fit(
-            states, targets,
-            epochs=1, verbose=0,
-            sample_weight=is_weights
+        # One compiled gradient step; IS weights correct for the non-uniform
+        # sampling distribution.
+        loss = self._train_step(
+            tf.convert_to_tensor(states),
+            tf.convert_to_tensor(targets),
+            tf.convert_to_tensor(is_weights),
         )
 
         # Soft target update every training step (no hard copy every N steps)
         self.train_counter += 1
         self._soft_update_target()
 
-        return history.history['loss'][0]
+        return float(loss)
 
     # ------------------------------------------------------------------
     # Epsilon and persistence

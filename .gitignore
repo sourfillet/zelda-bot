@@ -23,3 +23,5 @@ __pycache__/
 # --- Misc --------------------------------------------------------------------
 archive
 cuda-keyring_1.0-1_all.deb
+# Personal research log for ML/optimization decisions. Intentionally local-only.
+ML_NOTES.md

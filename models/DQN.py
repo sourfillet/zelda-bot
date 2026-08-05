@@ -33,6 +33,33 @@ class DQNAgent:
         self.target_model = self._build_model()
         self.update_target_model()  # initialize target network weights
 
+        # Compiled gradient step. Built once; it captures the variable objects,
+        # which load_weights()/set_weights() assign into in place.
+        self._train_step = self._build_train_step()
+
+    def _build_train_step(self):
+        """
+        Compile one gradient step into a tf.function.
+
+        Same update as model.fit() — same loss and optimizer — but without
+        Keras rebuilding its data adapters, callbacks and metrics on every
+        call, which dominates the cost at batch 32 called once per decision.
+        """
+        model = self.model
+        optimizer = model.optimizer
+        loss_fn = tf.keras.losses.MeanSquaredError()
+
+        @tf.function(reduce_retracing=True)
+        def train_step(states, targets):
+            with tf.GradientTape() as tape:
+                predictions = model(states, training=True)
+                loss = loss_fn(targets, predictions)
+            grads = tape.gradient(loss, model.trainable_variables)
+            optimizer.apply_gradients(zip(grads, model.trainable_variables, strict=True))
+            return loss
+
+        return train_step
+
     def _build_model(self):
         """
         Build the DQN model.
@@ -123,15 +150,16 @@ class DQNAgent:
             else:
                 target[i][actions[i]] = rewards[i] + self.discount_factor * bootstrap[i]
 
-        # Fit the main network on the updated target values
-        history = self.model.fit(states, target, epochs=1, verbose=0)
+        # One compiled gradient step on the updated target values
+        loss = self._train_step(tf.convert_to_tensor(states),
+                                tf.convert_to_tensor(target))
 
         # Increment the training step counter and update target network if needed
         self.train_counter += 1
         if self.train_counter % self.target_update_freq == 0:
             self.update_target_model()
 
-        return history.history['loss'][0]
+        return float(loss)
 
     def update_epsilon(self):
         """
