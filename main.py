@@ -4,6 +4,7 @@ import datetime
 import glob
 import json
 import os
+import re
 import sys
 from collections import deque
 
@@ -338,12 +339,21 @@ def find_latest_checkpoint(game, root=RUNS_ROOT):
     with the game absent from the filename, so "latest" could hand a Mario
     network (8 actions) to a Zelda run (10) purely because it was written more
     recently.
+
+    Picks the newest run directory (their names begin with a sortable timestamp)
+    then the highest episode number inside it. Ordering by filesystem ctime
+    instead is wrong the moment a run directory is copied or moved, since that
+    rewrites ctime on every file at once.
     """
-    pattern = os.path.join(root, game, "*", "checkpoints", "*.keras")
-    files = [f for f in glob.glob(pattern) if os.path.basename(f) != "best.keras"]
-    if not files:
-        return None
-    return max(files, key=os.path.getctime)
+    def episode_of(path):
+        m = re.search(r"episode(\d+)", os.path.basename(path))
+        return int(m.group(1)) if m else -1
+
+    for run_dir in sorted(glob.glob(os.path.join(root, game, "*")), reverse=True):
+        files = glob.glob(os.path.join(run_dir, "checkpoints", "episode*.keras"))
+        if files:
+            return max(files, key=episode_of)
+    return None
 
 def load_model_into_agent(agent, model_file):
     """
