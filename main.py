@@ -48,6 +48,18 @@ def get_stacked_state(frame_stack):
     """
     return np.reshape(np.concatenate(list(frame_stack), axis=2), [1, 84, 84, 4])
 
+def clip_reward(reward, limit):
+    """
+    Clamp a per-decision reward to +/- limit; a non-positive limit disables it.
+
+    With gamma=0.99 a limit of 1.0 caps any legitimate |Q| at about 100, so a
+    larger value is unambiguously divergence rather than a plausible estimate.
+    Only the training signal is clipped — logged episode returns stay raw.
+    """
+    if limit is None or limit <= 0:
+        return reward
+    return max(-limit, min(limit, reward))
+
 def load_config(config_file):
     """
     Load configuration parameters from a JSON file.
@@ -105,6 +117,13 @@ def parse_arguments():
                         help='Path to a specific model file to load, or "latest" to load most recent')
     parser.add_argument('--record_freq', type=int, default=25,
                         help='Record video every N episodes (default: 25)')
+    parser.add_argument('--reward_clip', type=float,
+                        default=config_defaults.get('reward_clip', 1.0),
+                        help='Clamp per-decision training reward to +/- this; 0 disables')
+    # Point smoke tests at a scratch file so they cannot rotate or append to the
+    # log of a training run that is already in flight.
+    parser.add_argument('--log_file', type=str, default='training_log.csv',
+                        help='CSV to append per-episode stats to')
     args = parser.parse_args()
 
     # Resolve the sentinels, remembering which were set on the CLI.
@@ -201,8 +220,8 @@ def save_model(agent, episode, model_dir="saved_models"):
 
 # Game-agnostic log columns. The chosen game adapter contributes extra columns
 # (adapter.log_fields) inserted before 'timestamp'.
-BASE_LOG_COLUMNS = ['episode', 'episode_reward', 'moving_avg', 'avg_loss', 'epsilon', 'frames',
-                    'training_steps', 'replay_buffer_size']
+BASE_LOG_COLUMNS = ['episode', 'episode_reward', 'moving_avg', 'avg_loss', 'max_q', 'epsilon',
+                    'frames', 'training_steps', 'replay_buffer_size']
 
 def log_episode_stats(columns, values, log_file="training_log.csv"):
     """
@@ -219,7 +238,10 @@ def log_episode_stats(columns, values, log_file="training_log.csv"):
         with open(log_file, newline='') as f:
             header = f.readline().strip().split(',')
         if header != columns:
-            backup = log_file.replace('.csv', '_legacy.csv')
+            # Timestamped so a second column change cannot overwrite the first
+            # rotation and silently destroy an earlier run's history.
+            stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup = log_file.replace('.csv', f'_legacy_{stamp}.csv')
             os.replace(log_file, backup)
             print(f"Log columns changed — rotated old log to {backup}")
 
@@ -384,14 +406,22 @@ def main():
                     break
 
             total_rewards += reward
+            # Logged reward stays unclipped so episode returns remain comparable
+            # across runs and interpretable against the adapter's reward table.
             episode_reward += reward
 
             next_frame = preprocess_frame(obs)
             frame_stack.append(next_frame)
             next_state = get_stacked_state(frame_stack)
 
+            # The agent trains on the *clipped* reward. Huber loss, clipnorm and
+            # the PER priority ceiling all bound how fast Q can move; none of
+            # them bound where it can move to. Clipping the reward bounds the
+            # Bellman target by construction (|Q| <= clip / (1 - gamma)), which
+            # is the ingredient standard DQN uses and this loop was missing.
             # Every decision transition is stored and trained on — nothing is dropped
-            loss = agent.train(state, action, reward, next_state, done)
+            loss = agent.train(state, action, clip_reward(reward, args.reward_clip),
+                               next_state, done)
             if loss is not None:
                 episode_loss += loss
                 training_steps += 1
@@ -411,6 +441,12 @@ def main():
         # Game-specific episode metrics (e.g. kills/cleared for Zelda)
         stats = adapter.episode_stats()
 
+        # Peak |Q| this episode, then reset for the next one. With clipped
+        # rewards this should settle near reward_clip / (1 - discount_factor);
+        # an order-of-magnitude jump is divergence starting.
+        max_abs_q = getattr(agent, 'max_abs_q', 0.0)
+        agent.max_abs_q = 0.0
+
         # Calculate the reward moving average over the last 10 episodes
         window_size = min(10, len(episode_rewards))
         moving_avg = sum(episode_rewards[-window_size:]) / window_size
@@ -425,6 +461,7 @@ def main():
         if summary:
             print(summary)
         print(f"Avg Loss: {avg_loss:.4f}")
+        print(f"Max |Q|: {max_abs_q:.4g}")
         print(f"Epsilon: {agent.epsilon:.4f}")
         print(f"Frames: {frame_count}")
         print(f"Training Steps: {training_steps}")
@@ -437,6 +474,7 @@ def main():
             'episode_reward': f"{episode_reward:.2f}",
             'moving_avg': f"{moving_avg:.2f}",
             'avg_loss': f"{avg_loss:.4f}",
+            'max_q': f"{max_abs_q:.4g}",
             'epsilon': f"{agent.epsilon:.4f}",
             'frames': frame_count,
             'training_steps': training_steps,
@@ -444,7 +482,7 @@ def main():
             **stats,
             'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
-        log_episode_stats(log_columns, values)
+        log_episode_stats(log_columns, values, log_file=args.log_file)
 
         # Save model if this is the best performance so far, or every 50 episodes
         if episode_reward > best_reward or episode % 50 == 0:

@@ -194,6 +194,12 @@ class RainbowDQNAgent:
 
         self.train_counter = 0
 
+        # Largest |Q| seen since the last reset. main.py logs and clears this
+        # per episode: with clipped rewards and gamma=0.99 a legitimate |Q| stays
+        # around 100, so this column shows divergence starting rather than
+        # leaving it to be inferred from the loss 50 episodes later.
+        self.max_abs_q = 0.0
+
         # Build main and target networks
         self.model = self._build_model()
         self.target_model = self._build_model()
@@ -428,6 +434,8 @@ class RainbowDQNAgent:
         main_q_next = combined[self.batch_size:]
         # The target network evaluates that action; separate model, separate call.
         target_q_next = self.target_model(next_states, training=False).numpy()
+
+        self.max_abs_q = max(self.max_abs_q, float(np.abs(current_q).max()))
 
         gamma_n = self.discount_factor ** n_steps
         targets = current_q.copy()

@@ -28,6 +28,10 @@ class DQNAgent:
         self.target_update_freq = 100  # update target network every 100 training steps
         self.train_counter = 0
 
+        # Largest |Q| seen since the last reset; main.py logs and clears this
+        # per episode as an early divergence signal.
+        self.max_abs_q = 0.0
+
         # Build main Q-network and target Q-network
         self.model = self._build_model()
         self.target_model = self._build_model()
@@ -142,6 +146,9 @@ class DQNAgent:
         # the (overridable) target rule.
         target = self.model(states, training=False).numpy()
         bootstrap = self._bootstrap_values(next_states)
+
+        # Record before `target` is overwritten with Bellman targets below.
+        self.max_abs_q = max(self.max_abs_q, float(np.abs(target).max()))
 
         # Update the Q-value for the taken action
         for i in range(self.batch_size):
