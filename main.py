@@ -2,6 +2,7 @@ import argparse
 import csv
 import datetime
 import glob
+import io
 import json
 import os
 import re
@@ -215,16 +216,30 @@ def write_run_config(run_dir: str, args: argparse.Namespace, adapter: GameAdapte
 
 def append_run_index(run_dir: str, config: dict[str, Any],
                      root: str = RUNS_ROOT) -> None:
-    """Register the run in runs/index.csv so runs are discoverable in one place."""
+    """Register the run in runs/index.csv so runs are discoverable in one place.
+
+    Written with a single os.write to an O_APPEND descriptor. Buffered file
+    writes are not atomic between processes, and two runs starting at the same
+    moment interleaved mid-row here, leaving a fragment ("yer.Level1") in the
+    index. A lone write of well under PIPE_BUF to an O_APPEND fd cannot split.
+    """
     index = os.path.join(root, "index.csv")
     columns = ["started", "game", "model", "state", "num_episodes", "git_commit", "run_dir"]
-    exists = os.path.exists(index)
-    with open(index, "a", newline="") as f:
-        writer = csv.writer(f)
-        if not exists:
-            writer.writerow(columns)
-        writer.writerow([config["started"], config["game"], config["model"], config["state"],
-                         config["args"].get("num_episodes"), config["git_commit"], run_dir])
+    row = [config["started"], config["game"], config["model"], config["state"],
+           config["args"].get("num_episodes"), config["git_commit"], run_dir]
+
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    if not os.path.exists(index):
+        writer.writerow(columns)
+    writer.writerow(row)
+
+    os.makedirs(root, exist_ok=True)
+    fd = os.open(index, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        os.write(fd, buf.getvalue().encode())
+    finally:
+        os.close(fd)
 
 def update_run_summary(run_dir: str, episode: int, episode_reward: float,
                        best_reward: float, max_abs_q: float,
