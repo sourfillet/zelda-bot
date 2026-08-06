@@ -1,3 +1,39 @@
+[project]
+name = "zelda-bot"
+version = "0.1.0"
+description = "Reinforcement learning agents that play NES games via stable-retro"
+readme = "readme.md"
+requires-python = ">=3.11"
+dependencies = [
+    # [and-cuda] pulls the 12 nvidia-* wheels that requirements.txt listed by hand
+    "tensorflow[and-cuda]==2.18.0",
+    "stable-retro==0.9.3",
+    "gymnasium==1.0.0",
+    "opencv-python==4.11.0.86",
+    "numpy==2.0.2",
+    "h5py==3.15.1",
+]
+
+[dependency-groups]
+dev = [
+    "ruff==0.16.1",
+    "mypy==2.3.0",
+]
+
+[tool.uv]
+# This is an application, not a library — nothing imports zelda-bot, so uv
+# manages the environment without building or installing the project itself.
+package = false
+
+# Held at the versions this CUDA/TensorFlow environment was verified against.
+# Neither is a direct dependency -- TF pulls them -- but both can change model
+# behaviour, so a tooling migration should not move them silently. Lift with
+# `uv lock --upgrade` as a deliberate, separately verified change.
+constraint-dependencies = [
+    "keras==3.13.0",
+    "wrapt==1.17.2",
+]
+
 [tool.ruff]
 line-length = 110
 target-version = "py311"

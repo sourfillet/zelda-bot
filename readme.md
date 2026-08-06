@@ -26,7 +26,7 @@ SHA1 hash for the Zelda rom used:
 
 To check that your rom is being picked up before you start a long training run:
 
-    python scripts/integrate.py
+    uv run scripts/integrate.py
 
 ## How is the repo laid out?
 
@@ -69,29 +69,34 @@ You can run these using CPU only, but it's going to be **slow**.
 
 ### Required libraries
 
-You can install the required libraries using pip and the requirements.txt file:
+This project uses [uv](https://docs.astral.sh/uv/). One command creates the
+virtualenv and installs everything, pinned by `uv.lock`:
 
-    pip install -r ./requirements.txt
+    uv sync
 
-To confirm the GPU is visible to Tensorflow:
+Then run anything through `uv run`, which uses that environment without needing
+activation:
 
-    python scripts/gputest.py
+    uv run scripts/gputest.py
+
+That should print a `PhysicalDevice(... device_type='GPU')` entry. If you would
+rather not use uv, `requirements.txt` is generated from the same lock and still
+works with `pip install -r requirements.txt`.
 
 ### Linting
 
-Ruff and Mypy are configured in `pyproject.toml`. They aren't needed to train, so they live in a separate requirements file:
+Ruff and Mypy are configured in `pyproject.toml` and installed by `uv sync` as a dev dependency group:
 
-    pip install -r requirements-dev.txt
-    ruff check .          # add --fix to apply the safe fixes
-    mypy
+    uv run ruff check .   # add --fix to apply the safe fixes
+    uv run mypy
 
-Mypy runs in a deliberately permissive mode: this is numeric code with no annotations, so the aim is to catch real mistakes (typos, bad attribute access, unreachable branches) rather than to enforce full type coverage. `NPY002` is switched off in Ruff on purpose — migrating `np.random.*` to `Generator` would change the RNG stream and therefore every training trajectory, which is a behavioural change rather than a lint fix.
+Every function is annotated, and Mypy runs with `disallow_untyped_defs` so that stays true. Third-party calls still come back as `Any` (retro, TensorFlow and OpenCV ship no usable stubs), which is why the `disallow_any_*` options are left off. `NPY002` is switched off in Ruff on purpose — migrating `np.random.*` to `Generator` would change the RNG stream and therefore every training trajectory, which is a behavioural change rather than a lint fix.
 
 ### Training the models
 
 Once gym-retro is set up and the game is integrated, you can train the models by running main.py:
 
-    python main.py --config modelargs.json
+    uv run main.py --config modelargs.json
 
 The defaults in `modelargs.json` run 500 episodes of RainbowDQN on the `monsters` combat room. That takes roughly 4-8 hours on a 3060 Ti, and kills-per-episode should start climbing somewhere around episode 100-200.
 
@@ -119,11 +124,11 @@ To start fresh training without loading any model, just leave `--load_model` off
 
 To resume from the most recent checkpoint for the current game:
 
-    python main.py --config modelargs.json --load_model latest
+    uv run main.py --config modelargs.json --load_model latest
 
 To load a specific model file:
 
-    python main.py --config modelargs.json --load_model runs/Zelda/20260805_140619__RainbowDQN__monsters/checkpoints/best.keras
+    uv run main.py --config modelargs.json --load_model runs/Zelda/20260805_140619__RainbowDQN__monsters/checkpoints/best.keras
 
 Checkpoints are saved as `.keras`; older `.h5` files still load. Resuming drops epsilon to `epsilon_min` so the agent exploits what it already learned instead of re-exploring from scratch — pass `--epsilon` explicitly if you want to override that.
 
@@ -131,7 +136,7 @@ Checkpoints are saved as `.keras`; older `.h5` files still load. Resuming drops 
 
 1. Create `games/<GameName>/` containing the gym-retro integration files (`data.json`, `scenario.json`, `metadata.json`, `rom.sha`, and your save states). **Or** skip this entirely if retro already bundles the game — it ships verified integrations for 300+ titles.
 2. Add `games/<GameName>/adapter.py` with a `get_adapter(state)` factory returning a subclass of `GameAdapter` (see [games/base.py](games/base.py)). The adapter owns the action set, the reward shaping, the termination rules, and any extra columns you want in the training log.
-3. Run `python main.py --game <GameName>`.
+3. Run `uv run main.py --game <GameName>`.
 
 `main.py` does not need to change.
 
@@ -142,7 +147,7 @@ The directory name is a Python package name, so it has to be a valid identifier.
 
 Two reference implementations: [games/Zelda/adapter.py](games/Zelda/adapter.py) ships its own integration under `games/`, and [games/SuperMarioBros/adapter.py](games/SuperMarioBros/adapter.py) reuses one bundled with retro. For a bundled game the ROM goes into retro's data directory rather than `games/`:
 
-    python -m retro.import /path/to/directory/containing/roms
+    uv run python -m retro.import /path/to/directory/containing/roms
 
 ## To-do list
 
