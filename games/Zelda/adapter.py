@@ -18,8 +18,13 @@ from games.base import GameAdapter
 REWARD_VALUES = {
     # A level state is loaded but Link is in the overworld
     'level_state_in_overworld': -0.02,
-    # Link enters a new room
-    'new_room': -5.0,
+    # Link leaves the room he started in. Only charged in confined mode, where
+    # the point of the episode is to stay and fight (the `monsters` state).
+    'leave_start_room': -5.0,
+    # Link enters a room he has not seen this episode. Positive while roaming:
+    # exploration is the objective in a dungeon, not a failure. Sized to match
+    # a kill so discovery and combat pull with comparable force.
+    'new_room': 1.0,
     # Link moves to a new position in the room
     'movement': 0.05,
     # Link revisits a position (penalty for getting stuck)
@@ -66,6 +71,12 @@ ACTIONS_RELEASED = [[0] + a[1:8] + [0] for a in ACTIONS]
 # Anything else (death sequence, game over) terminates the episode.
 SCROLL_MODES = (4, 6, 7)
 NORMAL_MODE = 5
+
+# States where the episode is meant to stay on one screen. `monsters` is the
+# isolated combat room; everything else (a dungeon entrance, the overworld) is
+# meant to be roamed, so leaving a room there is normal play rather than
+# failure. Anything not listed here gets roaming behaviour.
+CONFINED_STATES = {"monsters"}
 
 # Save states that begin inside a dungeon (loading one but ending up in the
 # overworld means Link wandered out — a small penalty).
@@ -115,11 +126,15 @@ class ZeldaAdapter(GameAdapter):
     default_state = "monsters"
     actions = ACTIONS
     actions_released = ACTIONS_RELEASED
-    log_fields = ["kills", "kills_avg", "cleared"]
+    log_fields = ["kills", "kills_avg", "cleared", "rooms"]
 
     def __init__(self, state: str | None = None) -> None:
-        # Start state matters for the dungeon-in-overworld penalty.
+        # Start state matters for the dungeon-in-overworld penalty, and for
+        # whether Link is confined to one screen.
         self.state = state or self.default_state
+        # Single-screen combat vs free roaming. main.py may re-set self.state
+        # after validating it, so this is recomputed in reset().
+        self.confined = self.state in CONFINED_STATES
         # Moving-average history of kills across episodes.
         self._kill_history: list[int] = []
         self._cleared = False
@@ -130,8 +145,14 @@ class ZeldaAdapter(GameAdapter):
     # ------------------------------------------------------------------
 
     def reset(self) -> None:
+        self.confined = self.state in CONFINED_STATES
         self.old_info = None
         self.visited_rooms = {}
+        # The room Link starts in, recorded on the first frame. Seeding
+        # visited_rooms with it is what replaces the old hardcoded `!= 116`
+        # check: the starting room is never "new", whichever room it is.
+        self.start_room: int | None = None
+        self.rooms_found = 0
         # Lifetime kill counter ($52A) survives death/room transitions, so we
         # track kills as a delta from the episode's first observed value.
         self.start_kills = None
@@ -148,10 +169,12 @@ class ZeldaAdapter(GameAdapter):
 
         mode = info["Game Mode"]
         if mode in SCROLL_MODES:
-            # Crossing a room boundary — terminate so the penalty lands close in
-            # time to the action that caused it.
-            if self.old_info is not None:
-                return REWARD_VALUES['new_room'], True
+            # Mid-scroll between rooms. Confined episodes end here, so the
+            # penalty lands close in time to the action that caused it. While
+            # roaming this is ordinary movement: no reward, no termination, and
+            # the room itself is scored on arrival in _frame_reward.
+            if self.confined and self.old_info is not None:
+                return REWARD_VALUES['leave_start_room'], True
             return 0.0, False
         if mode != NORMAL_MODE:
             # Death / game over — penalize and end rather than fill the replay
@@ -174,11 +197,13 @@ class ZeldaAdapter(GameAdapter):
             "kills": self.episode_kills,
             "kills_avg": round(kills_avg, 2),
             "cleared": int(self._cleared),
+            "rooms": self.rooms_found,
         }
 
     def summary_line(self) -> str:
         cleared = " - ROOM CLEARED!" if self._cleared else ""
-        return f"Kills: {self.episode_kills}/{self.start_spawned}{cleared}"
+        rooms = "" if self.confined else f"  Rooms: {self.rooms_found}"
+        return f"Kills: {self.episode_kills}/{self.start_spawned}{rooms}{cleared}"
 
     # ------------------------------------------------------------------
     # Reward shaping (normal-play frames)
@@ -190,6 +215,9 @@ class ZeldaAdapter(GameAdapter):
             self.old_info = info
             self.old_info['Hearts'] = get_actual_hearts(
                 self.old_info['Heart Containers'], self.old_info['Hearts'])
+            # Seed the starting room so it is never counted as a discovery.
+            self.start_room = int(info['Room'])
+            self.visited_rooms.setdefault(self.start_room, {})
             return 0.0
 
         reward = 0.0
@@ -210,7 +238,11 @@ class ZeldaAdapter(GameAdapter):
 
         if info['Room'] not in self.visited_rooms:
             self.visited_rooms[info['Room']] = {}
-            if info['Room'] != 116:
+            # The starting room is seeded below on the first frame, so reaching
+            # this branch means a genuinely new room. Confined episodes never
+            # get here (they terminate mid-scroll).
+            if not self.confined:
+                self.rooms_found += 1
                 reward += REWARD_VALUES['new_room']
 
         # Encourage movement around the room
