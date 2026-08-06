@@ -122,6 +122,10 @@ def parse_arguments():
     parser.add_argument('--reward_clip', type=float,
                         default=config_defaults.get('reward_clip', 1.0),
                         help='Clamp per-decision training reward to +/- this; 0 disables')
+    parser.add_argument('--render', action='store_true',
+                        default=config_defaults.get('render', False),
+                        help='Show a live game window. Costs ~19ms per decision (~11x the '
+                             'emulator itself), so it is off unless you want to watch.')
     # Point smoke tests at a scratch file so they cannot rotate or append to the
     # log of a training run that is already in flight.
     parser.add_argument('--log_file', type=str, default='training_log.csv',
@@ -271,13 +275,20 @@ def resolve_state(game, state, default_state, from_cli):
         )
     return default_state
 
-def integrate(game, state=retro.State.DEFAULT):
+def integrate(game, state=retro.State.DEFAULT, render=False):
     """
     Build the retro environment for `game`. Call register_integrations() first.
+
+    render_mode is passed explicitly. retro.make() forwards nothing, so the env
+    otherwise inherits RetroEnv's own default of "human" — which silently opens
+    a viewer and redraws on every emulated frame. Measured at 4.69 ms/frame
+    against 0.43 ms with rendering off: about 19 ms per 4-frame decision, or
+    roughly eleven times the cost of the emulation itself.
     """
     available = retro.data.list_games(inttype=retro.data.Integrations.ALL)
     print(f"{game} in integrations:", game in available)
-    return retro.make(game, state=state, inttype=retro.data.Integrations.ALL)
+    return retro.make(game, state=state, inttype=retro.data.Integrations.ALL,
+                      render_mode="human" if render else None)
 
 def save_model(agent, episode, run_dir, is_best=False):
     """
@@ -386,7 +397,7 @@ def main():
                                args.state_from_cli)
     # Keep the adapter in step; Zelda reads self.state for its dungeon check.
     adapter.state = state_name
-    env = integrate(adapter.integration_name, state_name)
+    env = integrate(adapter.integration_name, state_name, render=args.render)
     action_size = len(adapter.actions)
     log_columns = BASE_LOG_COLUMNS + list(adapter.log_fields) + ['timestamp']
     total_rewards = 0
