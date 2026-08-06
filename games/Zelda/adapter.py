@@ -70,26 +70,24 @@ ACTIONS = [
 ACTIONS_RELEASED = [[0] + a[1:8] + [0] for a in ACTIONS]
 
 # ----------------------------------------------------------------------------
-# Minimap plane
+# HUD planes
 # ----------------------------------------------------------------------------
-# Region of the 224x240 observation holding the HUD minimap, measured off real
-# dungeon frames. Even without the Map item the game draws Link's current room
-# as a lit cell here, which is exactly the information the agent otherwise
-# lacks: two dungeon rooms that look alike are the same input to the network,
-# and the minimap tells them apart.
+# The whole HUD band, fed to the network as its own upscaled planes. It carries
+# things the 224x240 -> 84x84 downscale destroys: the minimap position marker
+# (a 3x3-px square that moves with the room, drawn even without the Map item),
+# the equipped items, and the key/bomb/rupee counts.
 #
-# It does NOT show visit history -- only one cell is ever lit -- so this fixes
-# state aliasing, not memory.
+# Split into columns rather than squeezed into one plane. The HUD is 240x56, so
+# one plane means a 0.35x horizontal scale that leaves the marker *smaller*
+# than it already was. Three 80px columns scale 1.05x horizontally and 1.50x
+# vertically, so nothing shrinks -- measured marker area 1.3x on level1 and
+# 1.7x on gamestart, versus 0.4x for a single stretched plane.
 #
-# The reason it needs its own plane: in the full-frame 84x84 downscale this
-# region collapses to 24x17 px and the marker to 2 px. Cropping first and
-# scaling that crop up to 84x84 turns the marker into roughly 11x11 px, big
-# enough for the first 8x8 stride-4 conv to actually resolve.
-# Measured, not guessed: the position marker is a 3x3 green square that moves
-# with the room — room 115 puts it at y44/x34, room 55 at y28/x37. The band
-# below covers the whole 8x8 grid it can occupy and deliberately excludes the
-# "LEVEL-n" banner above it (y 8..24), which is constant and would waste plane.
-MINIMAP_REGION = (24, 56, 16, 80)     # y0, y1, x0, x1
+# Taking the whole band also removes a fragile hand-fitted rectangle: an
+# earlier version cropped a guessed minimap box that turned out to be tuned to
+# level1 and monsters and missed the marker in other states.
+HUD_HEIGHT = 56          # playfield starts here
+HUD_COLUMNS = 3
 
 # Game Mode ($12) values that count as active gameplay:
 # 5 = normal play, 6 = preparing scroll, 7 = scrolling, 4 = finishing scroll.
@@ -152,10 +150,10 @@ class ZeldaAdapter(GameAdapter):
     actions = ACTIONS
     actions_released = ACTIONS_RELEASED
     log_fields = ["kills", "kills_avg", "cleared", "rooms"]
-    # One extra plane: the upscaled minimap. Set to 0 to train on the playfield
-    # alone -- note that changing it changes the network's input shape, so old
-    # checkpoints will not load across the switch.
-    extra_planes = 1
+    # One plane per HUD column. Set to 0 to train on the playfield alone --
+    # changing this changes the network's input shape, so checkpoints do not
+    # load across the switch.
+    extra_planes = HUD_COLUMNS
 
     def __init__(self, state: str | None = None) -> None:
         # Start state matters for the dungeon-in-overworld penalty, and for
@@ -218,17 +216,19 @@ class ZeldaAdapter(GameAdapter):
         return reward, False
 
     def extra_observation(self, frame: Any) -> Any:
-        """Crop the HUD minimap and scale it up into one 84x84 plane."""
+        """Slice the HUD band into columns, each upscaled to its own plane."""
         if self.extra_planes < 1:
             return None
-        y0, y1, x0, x1 = MINIMAP_REGION
-        crop = frame[y0:y1, x0:x1]
-        if crop.ndim == 3:
-            crop = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
-        # INTER_NEAREST keeps the marker a hard-edged block instead of blurring
-        # it into the surrounding box, which is the whole point of the plane.
-        plane = cv2.resize(crop, (84, 84), interpolation=cv2.INTER_NEAREST)
-        return np.reshape(plane, [84, 84, 1])
+        hud = frame[:HUD_HEIGHT]
+        if hud.ndim == 3:
+            hud = cv2.cvtColor(hud, cv2.COLOR_RGB2GRAY)
+        width = hud.shape[1] // HUD_COLUMNS
+        # INTER_NEAREST keeps small features hard-edged rather than blurring
+        # them into their background, which is the whole point of the planes.
+        planes = [cv2.resize(hud[:, i * width:(i + 1) * width], (84, 84),
+                             interpolation=cv2.INTER_NEAREST)
+                  for i in range(HUD_COLUMNS)]
+        return np.stack(planes, axis=2)
 
     def episode_stats(self) -> dict[str, Any]:
         self._kill_history.append(self.episode_kills)
