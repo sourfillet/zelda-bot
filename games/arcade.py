@@ -36,9 +36,15 @@ class ScoreGameAdapter(GameAdapter):
     override `shaped_reward()` to add game-specific signal.
     """
 
-    # RAM variable names, per the game's data.json
+    # RAM variable names, per the game's data.json.
+    #
+    # Games track survival one of two ways. Most expose a `lives` counter that
+    # steps down on each death. Others (Kid Icarus) expose a `health` bar and no
+    # lives at all: each hit costs a point and reaching zero is the death. Set
+    # whichever the integration provides; `lives_key` may be None.
     score_key = "score"
-    lives_key = "lives"
+    lives_key: str | None = "lives"
+    health_key: str | None = None
     gameover_key: str | None = None
 
     # Score points are raw game points (tens to thousands). Scaling keeps a
@@ -46,6 +52,9 @@ class ScoreGameAdapter(GameAdapter):
     # instead of being flattened by it.
     score_scale = 0.01
     death_penalty = -1.0
+    # Charged per point of `health_key` lost, for health-bar games. Chosen so
+    # that draining a full bar costs roughly what one death costs elsewhere.
+    damage_penalty = -0.1
 
     # When an episode ends:
     #
@@ -80,11 +89,13 @@ class ScoreGameAdapter(GameAdapter):
         self.start_lives = None
         self.episode_score = 0
         self.deaths = 0
+        self.damage_taken = 0
 
     def step(self, info: dict[str, Any], frame: int) -> tuple[float, bool]:
         if self.old_info is None:
             self.old_info = info
-            self.start_lives = int(info[self.lives_key])
+            if self.lives_key:
+                self.start_lives = int(info[self.lives_key])
             return 0.0, False
 
         old = self.old_info
@@ -95,7 +106,7 @@ class ScoreGameAdapter(GameAdapter):
         if self.gameover_key and int(info[self.gameover_key]) != int(old[self.gameover_key]):
             return 0.0, True
 
-        if int(info[self.lives_key]) < int(old[self.lives_key]):
+        if self.lives_key and int(info[self.lives_key]) < int(old[self.lives_key]):
             self.deaths += 1
             # In "gameover" mode play continues; the integration's scenario
             # supplies the real terminal (lives hitting 0, or going negative in
@@ -103,6 +114,17 @@ class ScoreGameAdapter(GameAdapter):
             return self.death_penalty, self.episode_ends_on == "life"
 
         reward = 0.0
+
+        # Health-bar games: pay per point lost, and treat an empty bar as the
+        # death. Health refills on respawn, so only losses are counted.
+        if self.health_key:
+            lost = int(old[self.health_key]) - int(info[self.health_key])
+            if lost > 0:
+                self.damage_taken += lost
+                reward += lost * self.damage_penalty
+                if int(info[self.health_key]) <= 0:
+                    self.deaths += 1
+                    return reward, self.episode_ends_on == "life"
         gained = int(info[self.score_key]) - int(old[self.score_key])
         # Score can reset or roll over; only pay for genuine increases.
         if gained > 0:
