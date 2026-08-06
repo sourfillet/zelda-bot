@@ -194,6 +194,11 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('--reward_clip', type=float,
                         default=config_defaults.get('reward_clip', 1.0),
                         help='Clamp per-decision training reward to +/- this; 0 disables')
+    parser.add_argument('--extra_planes', type=int,
+                        default=config_defaults.get('extra_planes', -1),
+                        help="Override the adapter's extra observation planes. -1 keeps "
+                             "whatever the adapter defines, 0 disables them entirely. Use 0 "
+                             "to A/B a game's HUD planes against plain frames.")
     parser.add_argument('--input_size', type=int,
                         default=config_defaults.get('input_size', DEFAULT_INPUT_SIZE),
                         help='Square edge every frame is resized to (default 84). Larger '
@@ -500,6 +505,19 @@ def main() -> None:
                                args.state_from_cli)
     # Keep the adapter in step; Zelda reads self.state for its dungeon check.
     adapter.state = state_name
+
+    # An adapter builds a fixed number of planes, so the only safe overrides are
+    # "off" or "exactly what it defines" — anything else would disagree with the
+    # array extra_observation() actually returns.
+    if args.extra_planes >= 0:
+        natural = type(adapter).extra_planes
+        if args.extra_planes not in (0, natural):
+            raise SystemExit(
+                f"--extra_planes {args.extra_planes} is not valid for {args.game}: it "
+                f"defines {natural}. Use 0 to disable, {natural} to keep them, or -1 "
+                "for the adapter's default."
+            )
+        adapter.extra_planes = args.extra_planes
     env = integrate(adapter.integration_name, state_name, render=args.render)
     action_size = len(adapter.actions)
     log_columns = BASE_LOG_COLUMNS + list(adapter.log_fields) + ['timestamp']
