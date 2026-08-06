@@ -9,6 +9,9 @@ retro's integration exposes only `score` and `lives` — no position, no ghost
 state, no dots-remaining. Reward is therefore score-driven with a death penalty
 and nothing else. `games/Zelda/ram_search.py` could find more if wanted.
 
+A full 3-life game runs ~3,200 frames, so use --max_frames 5000 or higher;
+the default 2000 would truncate roughly half of every episode.
+
 Integration: MsPacMan-Nes (note the capital M in "Man" — hence retro_name).
 """
 

@@ -47,6 +47,24 @@ class ScoreGameAdapter(GameAdapter):
     score_scale = 0.01
     death_penalty = -1.0
 
+    # When an episode ends:
+    #
+    #   "gameover" — play continues through deaths until the game itself ends.
+    #                Each life lost still pays death_penalty. The terminal
+    #                signal comes from the integration's own scenario.json,
+    #                which main.py already honours via `terminated`.
+    #   "life"     — the episode ends the first time a life is lost.
+    #
+    # "gameover" is the default because "life" means the agent never observes
+    # the game past the point of its first death: in Ms. Pac-Man it would only
+    # ever see the maze up to ~20 dots eaten, and could learn nothing about
+    # later stages. The cost is that respawn and death-animation frames enter
+    # the replay buffer, and episodes get roughly lives-times longer — check
+    # `max_frames` is large enough or you have only traded one truncation for
+    # another. Measured full-game lengths: Ms. Pac-Man ~3,200 frames,
+    # Donkey Kong ~1,250, Ice Climber ~18,000.
+    episode_ends_on = "gameover"
+
     log_fields = ["score", "deaths"]
 
     # Per-episode state
@@ -72,16 +90,17 @@ class ScoreGameAdapter(GameAdapter):
         old = self.old_info
         self.old_info = info
 
-        # Game over, where the integration exposes it
+        # An explicit game-over flag ends the episode in either mode. The life
+        # that caused it already paid death_penalty, so this adds nothing.
         if self.gameover_key and int(info[self.gameover_key]) != int(old[self.gameover_key]):
-            self.deaths += 1
-            return self.death_penalty, True
+            return 0.0, True
 
-        # Losing a life ends the episode, so the replay buffer does not fill
-        # with death-animation and respawn frames.
         if int(info[self.lives_key]) < int(old[self.lives_key]):
             self.deaths += 1
-            return self.death_penalty, True
+            # In "gameover" mode play continues; the integration's scenario
+            # supplies the real terminal (lives hitting 0, or going negative in
+            # Ice Climber's case) and main.py ends the episode on it.
+            return self.death_penalty, self.episode_ends_on == "life"
 
         reward = 0.0
         gained = int(info[self.score_key]) - int(old[self.score_key])

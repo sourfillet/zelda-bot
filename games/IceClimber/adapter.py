@@ -8,6 +8,11 @@ not the score — are what give an early gradient here.
 
 Vertical progression also makes it a useful contrast with Mario: "up" rather
 than "right", with the same underlying machinery.
+
+A full game runs ~18,000 frames — far longer than any sensible max_frames —
+so episodes here will be truncated by the cap rather than by game over. That
+is fine (truncation is not stored as terminal), but it means episode length
+is set by --max_frames, not by the game.
 """
 
 from typing import Any
