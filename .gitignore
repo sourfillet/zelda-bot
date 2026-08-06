@@ -9,6 +9,8 @@ games/*/test/
 # runs/<game>/<timestamp>__<model>__<state>/ holds everything one run produces:
 # config.json, training_log.csv, checkpoints/, recordings/, summary.json.
 runs/
+# ...but the explorer notebook is tooling, not run data, so keep it versioned.
+!runs/explore.ipynb
 ram_dumps/
 # Pre-reorganisation layout, plus the archived logs from it.
 saved_models/*

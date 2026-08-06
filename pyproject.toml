@@ -18,6 +18,9 @@ dependencies = [
 dev = [
     "ruff==0.16.1",
     "mypy==2.3.0",
+    "matplotlib>=3.11.1",
+    "pandas>=2.3.3",
+    "jupyterlab>=4.6.2",
 ]
 
 [tool.uv]
