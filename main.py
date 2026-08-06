@@ -25,9 +25,17 @@ from models.RainbowDQN import RainbowDQNAgent
 # tf.config.run_functions_eagerly(True)
 # tf.data.experimental.enable_debug_mode()
 
-# Network input: 4 stacked 84x84 grayscale frames. Generic across retro games —
-# every observation is resized to 84x84 in preprocess_frame regardless of game.
-INPUT_SHAPE = (84, 84, 4)
+# Network input: STACK_FRAMES stacked 84x84 grayscale frames, plus however many
+# extra planes the game adapter contributes (adapter.extra_planes). Generic
+# across retro games — every observation is resized to 84x84 in
+# preprocess_frame regardless of game, and adapters that add nothing keep the
+# original (84, 84, 4).
+STACK_FRAMES = 4
+
+
+def input_shape(adapter: "GameAdapter") -> tuple[int, int, int]:
+    """Network input shape for this game."""
+    return (84, 84, STACK_FRAMES + adapter.extra_planes)
 
 # Repeat each chosen action for this many emulated frames (standard Atari
 # frame skip). Rewards from every frame are accumulated into the stored
@@ -46,12 +54,61 @@ def preprocess_frame(obs: np.ndarray | tuple) -> np.ndarray:
     frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
     return np.reshape(frame, [84, 84, 1])
 
-def get_stacked_state(frame_stack: deque) -> np.ndarray:
+def get_stacked_state(frame_stack: deque, extra: np.ndarray | None = None) -> np.ndarray:
     """
-    Concatenate 4 frames along the channel axis.
-    Returns shape (1, 84, 84, 4) for batch inference.
+    Concatenate the frame stack, then any adapter planes, along the channels.
+    Returns shape (1, 84, 84, STACK_FRAMES + extra_planes) for batch inference.
     """
-    return np.reshape(np.concatenate(list(frame_stack), axis=2), [1, 84, 84, 4])
+    planes = list(frame_stack)
+    if extra is not None:
+        planes.append(extra)
+    stacked = np.concatenate(planes, axis=2)
+    return np.reshape(stacked, [1, *stacked.shape])
+
+
+def save_debug_frame(raw: np.ndarray, state: np.ndarray, run_dir: str,
+                     episode: int, frame: int) -> None:
+    """
+    Write one image showing exactly what the network was fed.
+
+    Left: the raw emulator frame. Right: every input plane in order, upscaled
+    and labelled — the stacked history first, then whatever the adapter added.
+    Answers "is the minimap plane actually carrying the marker" without having
+    to reason about it.
+    """
+    out_dir = os.path.join(run_dir, "debug")
+    os.makedirs(out_dir, exist_ok=True)
+
+    planes = [state[0, :, :, i] for i in range(state.shape[3])]
+    scale, pad = 2, 6
+    tiles = []
+    for i, p in enumerate(planes):
+        tile = cv2.cvtColor(cv2.resize(p, (84 * scale, 84 * scale),
+                                       interpolation=cv2.INTER_NEAREST),
+                            cv2.COLOR_GRAY2BGR)
+        label = f"frame t-{STACK_FRAMES - 1 - i}" if i < STACK_FRAMES else f"extra {i - STACK_FRAMES}"
+        cv2.rectangle(tile, (0, 0), (tile.shape[1] - 1, tile.shape[0] - 1), (70, 70, 70), 1)
+        # Label on its own strip rather than over the image, so it never
+        # obscures the very thing being inspected.
+        cv2.rectangle(tile, (0, 0), (tile.shape[1], 18), (25, 25, 25), -1)
+        cv2.putText(tile, label, (5, 13), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (235, 235, 235), 1,
+                    cv2.LINE_AA)
+        tiles.append(tile)
+
+    per_row = min(len(tiles), 3)
+    rows = []
+    for r in range(0, len(tiles), per_row):
+        row = tiles[r:r + per_row]
+        while len(row) < per_row:
+            row.append(np.zeros_like(tiles[0]))
+        rows.append(np.hstack([np.pad(t, ((pad, pad), (pad, pad), (0, 0))) for t in row]))
+    grid = np.vstack(rows)
+
+    raw_bgr = cv2.cvtColor(raw, cv2.COLOR_RGB2BGR)
+    h = grid.shape[0]
+    raw_scaled = cv2.resize(raw_bgr, (int(raw_bgr.shape[1] * h / raw_bgr.shape[0]), h))
+    canvas = np.hstack([np.pad(raw_scaled, ((0, 0), (pad, pad), (0, 0))), grid])
+    cv2.imwrite(os.path.join(out_dir, f"ep{episode:04d}_f{frame:05d}.png"), canvas)
 
 def clip_reward(reward: float, limit: float | None) -> float:
     """
@@ -125,6 +182,9 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('--reward_clip', type=float,
                         default=config_defaults.get('reward_clip', 1.0),
                         help='Clamp per-decision training reward to +/- this; 0 disables')
+    parser.add_argument('--debug_frames', type=int, default=0,
+                        help='Save an image of every Nth decision showing all model input '
+                             'planes, into the run\'s debug/ folder. 0 disables.')
     parser.add_argument('--render', action='store_true',
                         default=config_defaults.get('render', False),
                         help='Show a live game window. Costs ~19ms per decision (~11x the '
@@ -203,7 +263,8 @@ def write_run_config(run_dir: str, args: argparse.Namespace, adapter: GameAdapte
         "state": state,
         "model": args.model,
         "action_size": action_size,
-        "input_shape": list(INPUT_SHAPE),
+        "input_shape": list(input_shape(adapter)),
+        "extra_planes": adapter.extra_planes,
         "frame_skip": FRAME_SKIP,
         "args": dict(vars(args)),
     }
@@ -441,14 +502,18 @@ def main() -> None:
     # Initialize the agent. RainbowDQNAgent is a separate implementation rather
     # than a DQNAgent subclass, so the union spells out what main.py drives.
     agent: DQNAgent | RainbowDQNAgent
+    shape = input_shape(adapter)
+    if adapter.extra_planes:
+        print(f"Input shape: {shape}  ({STACK_FRAMES} stacked frames "
+              f"+ {adapter.extra_planes} adapter plane(s))")
     if args.model == 'DQN':
-        agent = DQNAgent(INPUT_SHAPE, action_size, args.learning_rate,
+        agent = DQNAgent(shape, action_size, args.learning_rate,
                          args.discount_factor, args.epsilon, args.epsilon_decay, args.epsilon_min)
     elif args.model == 'DoubleDQN':
-        agent = DoubleDQNAgent(INPUT_SHAPE, action_size, args.learning_rate,
+        agent = DoubleDQNAgent(shape, action_size, args.learning_rate,
                                args.discount_factor, args.epsilon, args.epsilon_decay, args.epsilon_min)
     elif args.model == 'RainbowDQN':
-        agent = RainbowDQNAgent(INPUT_SHAPE, action_size, args.learning_rate,
+        agent = RainbowDQNAgent(shape, action_size, args.learning_rate,
                                 args.discount_factor, args.epsilon, args.epsilon_decay, args.epsilon_min)
     else:
         raise SystemExit(f"Unknown model {args.model!r}. Choose DQN, DoubleDQN, or RainbowDQN.")
@@ -484,9 +549,10 @@ def main() -> None:
         done = False
 
         # Initialize frame stack with 4 copies of the first frame
+        raw = obs[0] if isinstance(obs, tuple) else obs
         frame = preprocess_frame(obs)
-        frame_stack = deque([frame] * 4, maxlen=4)
-        state = get_stacked_state(frame_stack)
+        frame_stack = deque([frame] * STACK_FRAMES, maxlen=STACK_FRAMES)
+        state = get_stacked_state(frame_stack, adapter.extra_observation(raw))
 
         # Initialize per-episode reward counter.
         episode_reward = 0.0
@@ -558,9 +624,13 @@ def main() -> None:
             # across runs and interpretable against the adapter's reward table.
             episode_reward += reward
 
+            raw = obs[0] if isinstance(obs, tuple) else obs
             next_frame = preprocess_frame(obs)
             frame_stack.append(next_frame)
-            next_state = get_stacked_state(frame_stack)
+            next_state = get_stacked_state(frame_stack, adapter.extra_observation(raw))
+
+            if args.debug_frames and frame_count % args.debug_frames < FRAME_SKIP:
+                save_debug_frame(raw, next_state, run_dir, episode, frame_count)
 
             # The agent trains on the *clipped* reward. Huber loss, clipnorm and
             # the PER priority ceiling all bound how fast Q can move; none of

@@ -10,6 +10,9 @@ where the agent learns to kill enemies. Kill is the dominant reward signal.
 
 from typing import Any
 
+import cv2
+import numpy as np
+
 from games.base import GameAdapter
 
 # ----------------------------------------------------------------------------
@@ -65,6 +68,28 @@ ACTIONS = [
 # frame-skip window releases A/B so every attack decision lands as a fresh
 # press. Directions stay held (movement is level-triggered).
 ACTIONS_RELEASED = [[0] + a[1:8] + [0] for a in ACTIONS]
+
+# ----------------------------------------------------------------------------
+# Minimap plane
+# ----------------------------------------------------------------------------
+# Region of the 224x240 observation holding the HUD minimap, measured off real
+# dungeon frames. Even without the Map item the game draws Link's current room
+# as a lit cell here, which is exactly the information the agent otherwise
+# lacks: two dungeon rooms that look alike are the same input to the network,
+# and the minimap tells them apart.
+#
+# It does NOT show visit history -- only one cell is ever lit -- so this fixes
+# state aliasing, not memory.
+#
+# The reason it needs its own plane: in the full-frame 84x84 downscale this
+# region collapses to 24x17 px and the marker to 2 px. Cropping first and
+# scaling that crop up to 84x84 turns the marker into roughly 11x11 px, big
+# enough for the first 8x8 stride-4 conv to actually resolve.
+# Measured, not guessed: the position marker is a 3x3 green square that moves
+# with the room — room 115 puts it at y44/x34, room 55 at y28/x37. The band
+# below covers the whole 8x8 grid it can occupy and deliberately excludes the
+# "LEVEL-n" banner above it (y 8..24), which is constant and would waste plane.
+MINIMAP_REGION = (24, 56, 16, 80)     # y0, y1, x0, x1
 
 # Game Mode ($12) values that count as active gameplay:
 # 5 = normal play, 6 = preparing scroll, 7 = scrolling, 4 = finishing scroll.
@@ -127,6 +152,10 @@ class ZeldaAdapter(GameAdapter):
     actions = ACTIONS
     actions_released = ACTIONS_RELEASED
     log_fields = ["kills", "kills_avg", "cleared", "rooms"]
+    # One extra plane: the upscaled minimap. Set to 0 to train on the playfield
+    # alone -- note that changing it changes the network's input shape, so old
+    # checkpoints will not load across the switch.
+    extra_planes = 1
 
     def __init__(self, state: str | None = None) -> None:
         # Start state matters for the dungeon-in-overworld penalty, and for
@@ -187,6 +216,19 @@ class ZeldaAdapter(GameAdapter):
         if frame < 200 and reward == REWARD_VALUES['repeat_state']:
             reward = 0.0
         return reward, False
+
+    def extra_observation(self, frame: Any) -> Any:
+        """Crop the HUD minimap and scale it up into one 84x84 plane."""
+        if self.extra_planes < 1:
+            return None
+        y0, y1, x0, x1 = MINIMAP_REGION
+        crop = frame[y0:y1, x0:x1]
+        if crop.ndim == 3:
+            crop = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+        # INTER_NEAREST keeps the marker a hard-edged block instead of blurring
+        # it into the surrounding box, which is the whole point of the plane.
+        plane = cv2.resize(crop, (84, 84), interpolation=cv2.INTER_NEAREST)
+        return np.reshape(plane, [84, 84, 1])
 
     def episode_stats(self) -> dict[str, Any]:
         self._kill_history.append(self.episode_kills)

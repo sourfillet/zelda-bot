@@ -35,6 +35,13 @@ class GameAdapter:
     actions_released: list[list[int]] | None = None
     # extra CSV columns this game contributes to training_log.csv
     log_fields: list[str] = []
+    # Number of additional 84x84 observation planes this game appends to the
+    # frame stack. 0 means the network sees only the stacked playfield, which is
+    # the default for every game. A game sets this when part of the screen
+    # carries information the downscale destroys — see ZeldaAdapter, whose
+    # dungeon minimap survives as 2 pixels at 84x84 and is given a plane of its
+    # own so the position marker is large enough to learn from.
+    extra_planes: int = 0
     # resolved start state for this run. Subclasses set it in __init__; main.py
     # re-sets it after validating the state against the game's available ones.
     state: str | None = None
@@ -65,6 +72,20 @@ class GameAdapter:
             should terminate.
         """
         raise NotImplementedError
+
+    def extra_observation(self, frame: Any) -> Any:
+        """Build this game's `extra_planes` additional observation planes.
+
+        Args:
+            frame: the raw full-resolution RGB observation, before any
+                   downscaling — the point of this hook is to read detail that
+                   84x84 would destroy.
+
+        Returns:
+            uint8 array of shape (84, 84, extra_planes), or None when
+            `extra_planes` is 0.
+        """
+        return None
 
     def episode_stats(self) -> dict[str, Any]:
         """Return a {column: value} dict for ``log_fields`` at episode end."""
