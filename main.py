@@ -32,10 +32,19 @@ from models.RainbowDQN import RainbowDQNAgent
 # original (84, 84, 4).
 STACK_FRAMES = 4
 
+# Default square edge every observation is resized to. 84 is the original
+# Atari DQN figure, chosen to keep the network small; --input_size overrides it.
+# Bigger preserves more detail at a steep parameter cost, almost all of it in
+# the flatten -> Dense(512): measured 1.95M params at 84, 5.06M at 128 and
+# 20.8M at the native 224x240. Step time barely moves (1.0x / 1.1x / 1.5x) —
+# the cost is sample efficiency, since a larger network needs more episodes to
+# fit, and replay memory (1.13 / 2.62 / 8.60 GB at capacity).
+DEFAULT_INPUT_SIZE = 84
 
-def input_shape(adapter: "GameAdapter") -> tuple[int, int, int]:
+
+def input_shape(adapter: "GameAdapter", size: int = DEFAULT_INPUT_SIZE) -> tuple[int, int, int]:
     """Network input shape for this game."""
-    return (84, 84, STACK_FRAMES + adapter.extra_planes)
+    return (size, size, STACK_FRAMES + adapter.extra_planes)
 
 # Repeat each chosen action for this many emulated frames (standard Atari
 # frame skip). Rewards from every frame are accumulated into the stored
@@ -43,21 +52,22 @@ def input_shape(adapter: "GameAdapter") -> tuple[int, int, int]:
 # action set and the back-half "released" variant for edge-triggered buttons.
 FRAME_SKIP = 4
 
-def preprocess_frame(obs: np.ndarray | tuple) -> np.ndarray:
+def preprocess_frame(obs: np.ndarray | tuple,
+                     size: int = DEFAULT_INPUT_SIZE) -> np.ndarray:
     """
-    Preprocess a single observation: resize to 84x84 and convert to grayscale.
-    Returns shape (84, 84, 1).
+    Preprocess a single observation: resize to size x size, convert to greyscale.
+    Returns shape (size, size, 1).
     """
     # env.reset() returns (obs, info) while env.step() returns the array directly
     frame: np.ndarray = obs[0] if isinstance(obs, tuple) else obs
-    frame = cv2.resize(frame, (84, 84))
+    frame = cv2.resize(frame, (size, size))
     frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-    return np.reshape(frame, [84, 84, 1])
+    return np.reshape(frame, [size, size, 1])
 
 def get_stacked_state(frame_stack: deque, extra: np.ndarray | None = None) -> np.ndarray:
     """
     Concatenate the frame stack, then any adapter planes, along the channels.
-    Returns shape (1, 84, 84, STACK_FRAMES + extra_planes) for batch inference.
+    Returns shape (1, size, size, STACK_FRAMES + extra_planes) for inference.
     """
     planes = list(frame_stack)
     if extra is not None:
@@ -80,10 +90,12 @@ def save_debug_frame(raw: np.ndarray, state: np.ndarray, run_dir: str,
     os.makedirs(out_dir, exist_ok=True)
 
     planes = [state[0, :, :, i] for i in range(state.shape[3])]
-    scale, pad = 2, 6
+    edge = state.shape[1]
+    # keep tiles a readable size whatever the input resolution
+    scale, pad = max(1, 168 // edge), 6
     tiles = []
     for i, p in enumerate(planes):
-        tile = cv2.cvtColor(cv2.resize(p, (84 * scale, 84 * scale),
+        tile = cv2.cvtColor(cv2.resize(p, (edge * scale, edge * scale),
                                        interpolation=cv2.INTER_NEAREST),
                             cv2.COLOR_GRAY2BGR)
         label = f"frame t-{STACK_FRAMES - 1 - i}" if i < STACK_FRAMES else f"extra {i - STACK_FRAMES}"
@@ -182,6 +194,11 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('--reward_clip', type=float,
                         default=config_defaults.get('reward_clip', 1.0),
                         help='Clamp per-decision training reward to +/- this; 0 disables')
+    parser.add_argument('--input_size', type=int,
+                        default=config_defaults.get('input_size', DEFAULT_INPUT_SIZE),
+                        help='Square edge every frame is resized to (default 84). Larger '
+                             'keeps more detail but grows the network sharply; changing it '
+                             'changes the input shape, so checkpoints do not carry over.')
     parser.add_argument('--debug_frames', type=int, default=0,
                         help='Save an image of every Nth decision showing all model input '
                              'planes, into the run\'s debug/ folder. 0 disables.')
@@ -263,7 +280,7 @@ def write_run_config(run_dir: str, args: argparse.Namespace, adapter: GameAdapte
         "state": state,
         "model": args.model,
         "action_size": action_size,
-        "input_shape": list(input_shape(adapter)),
+        "input_shape": list(input_shape(adapter, args.input_size)),
         "extra_planes": adapter.extra_planes,
         "frame_skip": FRAME_SKIP,
         "args": dict(vars(args)),
@@ -502,8 +519,8 @@ def main() -> None:
     # Initialize the agent. RainbowDQNAgent is a separate implementation rather
     # than a DQNAgent subclass, so the union spells out what main.py drives.
     agent: DQNAgent | RainbowDQNAgent
-    shape = input_shape(adapter)
-    if adapter.extra_planes:
+    shape = input_shape(adapter, args.input_size)
+    if args.input_size != DEFAULT_INPUT_SIZE or adapter.extra_planes:
         print(f"Input shape: {shape}  ({STACK_FRAMES} stacked frames "
               f"+ {adapter.extra_planes} adapter plane(s))")
     if args.model == 'DQN':
@@ -550,9 +567,10 @@ def main() -> None:
 
         # Initialize frame stack with 4 copies of the first frame
         raw = obs[0] if isinstance(obs, tuple) else obs
-        frame = preprocess_frame(obs)
+        frame = preprocess_frame(obs, args.input_size)
         frame_stack = deque([frame] * STACK_FRAMES, maxlen=STACK_FRAMES)
-        state = get_stacked_state(frame_stack, adapter.extra_observation(raw))
+        state = get_stacked_state(frame_stack,
+                                  adapter.extra_observation(raw, args.input_size))
 
         # Initialize per-episode reward counter.
         episode_reward = 0.0
@@ -625,9 +643,10 @@ def main() -> None:
             episode_reward += reward
 
             raw = obs[0] if isinstance(obs, tuple) else obs
-            next_frame = preprocess_frame(obs)
+            next_frame = preprocess_frame(obs, args.input_size)
             frame_stack.append(next_frame)
-            next_state = get_stacked_state(frame_stack, adapter.extra_observation(raw))
+            next_state = get_stacked_state(frame_stack,
+                                           adapter.extra_observation(raw, args.input_size))
 
             if args.debug_frames and frame_count % args.debug_frames < FRAME_SKIP:
                 save_debug_frame(raw, next_state, run_dir, episode, frame_count)

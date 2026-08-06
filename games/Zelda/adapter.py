@@ -215,7 +215,7 @@ class ZeldaAdapter(GameAdapter):
             reward = 0.0
         return reward, False
 
-    def extra_observation(self, frame: Any) -> Any:
+    def extra_observation(self, frame: Any, size: int = 84) -> Any:
         """Slice the HUD band into columns, each upscaled to its own plane."""
         if self.extra_planes < 1:
             return None
@@ -225,7 +225,7 @@ class ZeldaAdapter(GameAdapter):
         width = hud.shape[1] // HUD_COLUMNS
         # INTER_NEAREST keeps small features hard-edged rather than blurring
         # them into their background, which is the whole point of the planes.
-        planes = [cv2.resize(hud[:, i * width:(i + 1) * width], (84, 84),
+        planes = [cv2.resize(hud[:, i * width:(i + 1) * width], (size, size),
                              interpolation=cv2.INTER_NEAREST)
                   for i in range(HUD_COLUMNS)]
         return np.stack(planes, axis=2)
