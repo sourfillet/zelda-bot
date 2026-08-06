@@ -29,9 +29,13 @@ class MsPacmanAdapter(ScoreGameAdapter):
         buttons(RIGHT),
     ]
 
-    # A dot is 10 points, so 0.01 puts a dot at +0.1 and a ghost (200) at +2.0
-    # before clipping.
-    score_scale = 0.01
+    # Measured, not assumed: the `score` variable increments by exactly 1 per
+    # dot (34/34 observations), so it stores score/10 rather than raw points.
+    # At 0.01 a dot was worth 0.01 and break-even against one death was 100
+    # dots -- roughly half the maze -- which is why episode reward sat at about
+    # -0.9 regardless of play. 0.1 puts a dot at +0.1, a power pellet (50pts)
+    # at +0.5, and break-even at 10 dots.
+    score_scale = 0.1
 
 
 def get_adapter(state: str | None = None) -> "MsPacmanAdapter":

@@ -41,6 +41,9 @@ class IceClimberAdapter(ScoreGameAdapter):
         buttons(DOWN),
     ]
 
+    # UNVERIFIED: score never moved in 8000 frames of random play (it appears
+    # to settle up at stage end), so these units are untested. The shaped
+    # counters below are what actually drive learning here.
     score_scale = 0.01
     log_fields = ["score", "deaths", "bricks"]
 

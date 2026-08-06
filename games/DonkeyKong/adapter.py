@@ -34,6 +34,9 @@ class DonkeyKongAdapter(ScoreGameAdapter):
     ]
 
     # Jumping a barrel is 100 points, so 0.01 puts it at +1.0.
+    # UNVERIFIED: score never moved in 8000 frames of random play, so the units
+    # of this variable are untested. Ms. Pac-Man's turned out to store score/10,
+    # not raw points -- check the first scoring episode before trusting this.
     score_scale = 0.01
 
 
