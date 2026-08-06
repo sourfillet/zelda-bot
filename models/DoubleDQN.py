@@ -13,7 +13,7 @@ class DoubleDQNAgent(DQNAgent):
         y  = r + gamma * Q_target(s', a*)
     """
 
-    def _bootstrap_values(self, next_states):
+    def _bootstrap_values(self, next_states: np.ndarray) -> np.ndarray:
         # Select the best next action with the main network ...
         main_q_next = self.model(next_states, training=False).numpy()
         best_actions = np.argmax(main_q_next, axis=1)

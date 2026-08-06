@@ -7,6 +7,8 @@ through this interface, so adding a new game means adding a new directory under
 ``games/`` with an adapter — the training loop never changes.
 """
 
+from typing import Any
+
 
 class GameAdapter:
     """Contract that ``main.py`` depends on. Subclass per game.
@@ -33,16 +35,25 @@ class GameAdapter:
     actions_released: list[list[int]] | None = None
     # extra CSV columns this game contributes to training_log.csv
     log_fields: list[str] = []
+    # resolved start state for this run. Subclasses set it in __init__; main.py
+    # re-sets it after validating the state against the game's available ones.
+    state: str | None = None
 
     @property
-    def integration_name(self):
+    def integration_name(self) -> str:
         """The id to hand to retro.make(). See `retro_name`."""
-        return self.retro_name or self.name
+        name = self.retro_name or self.name
+        if name is None:
+            raise NotImplementedError(
+                f"{type(self).__name__} must set `name` (and `retro_name` too if "
+                "the retro integration id differs from the package name)."
+            )
+        return name
 
-    def reset(self):
+    def reset(self) -> None:
         """Reset per-episode trackers. Called at the start of every episode."""
 
-    def step(self, info, frame):
+    def step(self, info: dict[str, Any], frame: int) -> tuple[float, bool]:
         """Process one emulated frame.
 
         Args:
@@ -55,10 +66,10 @@ class GameAdapter:
         """
         raise NotImplementedError
 
-    def episode_stats(self):
+    def episode_stats(self) -> dict[str, Any]:
         """Return a {column: value} dict for ``log_fields`` at episode end."""
         return {}
 
-    def summary_line(self):
+    def summary_line(self) -> str:
         """Optional human-readable one-liner printed to the console per episode."""
         return ""

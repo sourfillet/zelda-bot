@@ -23,7 +23,7 @@ Typical workflow:
 import argparse
 import json
 import os
-import sys
+from typing import Any
 
 import numpy as np
 
@@ -121,7 +121,7 @@ NOISE_RANGES = [
 ]
 
 
-def annotate(addr):
+def annotate(addr: int) -> str:
     if addr in KNOWN_MAP:
         return KNOWN_MAP[addr]
     for lo, hi, name in NOISE_RANGES:
@@ -130,11 +130,11 @@ def annotate(addr):
     return ""
 
 
-def is_noise(addr):
+def is_noise(addr: int) -> bool:
     return any(lo <= addr < hi for lo, hi, _ in NOISE_RANGES)
 
 
-def make_env(state):
+def make_env(state: str) -> Any:
     import retro
     retro.data.Integrations.add_custom_path(GAMES_DIR)
     return retro.make("Zelda", state=state, inttype=retro.data.Integrations.ALL)
@@ -156,7 +156,7 @@ RANDOM_COMBOS = [
 ]
 
 
-def cmd_record(args):
+def cmd_record(args: argparse.Namespace) -> None:
     env = make_env(args.state)
     env.reset()
 
@@ -189,12 +189,12 @@ def cmd_record(args):
     print(f"Saved {args.frames} frames x {ram_size} bytes to {out} ({resets} env resets)")
 
 
-def load_rams(path):
+def load_rams(path: str) -> np.ndarray:
     data = np.load(path, allow_pickle=True)
     return data["rams"]
 
 
-def classify(series):
+def classify(series: np.ndarray) -> tuple[str, int]:
     """Classify one address's time series into a coarse behavioral category."""
     diffs = np.diff(series.astype(np.int16))
     changes = np.count_nonzero(diffs)
@@ -217,7 +217,7 @@ def classify(series):
     return "variable", changes
 
 
-def cmd_analyze(args):
+def cmd_analyze(args: argparse.Namespace) -> None:
     rams = load_rams(args.dump)
     print(f"Loaded {rams.shape[0]} frames x {rams.shape[1]} addresses\n")
     rows = []
@@ -241,10 +241,10 @@ def cmd_analyze(args):
           f"({rams.shape[1] - len(rows)} constant or filtered)")
 
 
-def parse_event(spec, rams):
+def parse_event(spec: str, rams: np.ndarray) -> tuple[np.ndarray, int]:
     """Event spec: dec:0xADDR | inc:0xADDR | chg:0xADDR — frames where that happens."""
-    op, addr = spec.split(":")
-    addr = int(addr, 0)
+    op, addr_text = spec.split(":")
+    addr = int(addr_text, 0)
     diffs = np.diff(rams[:, addr].astype(np.int16))
     if op == "dec":
         mask = diffs < 0
@@ -257,7 +257,7 @@ def parse_event(spec, rams):
     return np.flatnonzero(mask), addr
 
 
-def cmd_correlate(args):
+def cmd_correlate(args: argparse.Namespace) -> None:
     rams = load_rams(args.dump)
     events, ev_addr = parse_event(args.event, rams)
     print(f"Event {args.event} ({annotate(ev_addr) or 'unannotated'}): "
@@ -297,7 +297,7 @@ def cmd_correlate(args):
         print("Nothing matched — loosen --min-recall/--min-precision or widen --window.")
 
 
-def cmd_verify(args):
+def cmd_verify(args: argparse.Namespace) -> None:
     rams = load_rams(args.dump)
     with open(DATA_JSON) as f:
         info_vars = json.load(f)["info"]
@@ -324,7 +324,7 @@ def cmd_verify(args):
               f"{series.min():>4} {series.max():>4}  {note}{flag}")
 
 
-def main():
+def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -364,4 +364,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

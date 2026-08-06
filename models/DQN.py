@@ -1,5 +1,7 @@
 import random
 from collections import deque
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import tensorflow as tf
@@ -9,8 +11,9 @@ from tensorflow.keras.optimizers import Adam
 
 
 class DQNAgent:
-    def __init__(self, input_shape, action_size, learning_rate, discount_factor,
-                 epsilon, epsilon_decay, epsilon_min):
+    def __init__(self, input_shape: tuple[int, int, int], action_size: int,
+                 learning_rate: float, discount_factor: float, epsilon: float,
+                 epsilon_decay: float, epsilon_min: float) -> None:
         self.input_shape = input_shape  # (height, width, stacked_frames), e.g. (84, 84, 4)
         self.action_size = action_size
         self.learning_rate = learning_rate
@@ -41,7 +44,7 @@ class DQNAgent:
         # which load_weights()/set_weights() assign into in place.
         self._train_step = self._build_train_step()
 
-    def _build_train_step(self):
+    def _build_train_step(self) -> Callable[[Any, Any], Any]:
         """
         Compile one gradient step into a tf.function.
 
@@ -54,7 +57,7 @@ class DQNAgent:
         loss_fn = tf.keras.losses.MeanSquaredError()
 
         @tf.function(reduce_retracing=True)
-        def train_step(states, targets):
+        def train_step(states: Any, targets: Any) -> Any:
             with tf.GradientTape() as tape:
                 predictions = model(states, training=True)
                 loss = loss_fn(targets, predictions)
@@ -64,7 +67,7 @@ class DQNAgent:
 
         return train_step
 
-    def _build_model(self):
+    def _build_model(self) -> Any:
         """
         Build the DQN model.
         """
@@ -81,13 +84,13 @@ class DQNAgent:
         model.compile(loss='mean_squared_error', optimizer=Adam(learning_rate=self.learning_rate))
         return model
 
-    def update_target_model(self):
+    def update_target_model(self) -> None:
         """
         Copy weights from the main network to the target network.
         """
         self.target_model.set_weights(self.model.get_weights())
 
-    def _bootstrap_values(self, next_states):
+    def _bootstrap_values(self, next_states: np.ndarray) -> np.ndarray:
         """
         Per-sample value of the next state used in the Bellman target.
         Standard DQN: max_a Q_target(s', a). Subclasses override this to change
@@ -96,7 +99,7 @@ class DQNAgent:
         target_next = self.target_model(next_states, training=False).numpy()
         return np.amax(target_next, axis=1)
 
-    def act(self, state):
+    def act(self, state: np.ndarray) -> np.ndarray:
         """
         Choose an action based on the epsilon-greedy policy.
         Returns a one-hot encoded action vector.
@@ -108,12 +111,13 @@ class DQNAgent:
             return action
 
         q_values = self.model(state, training=False).numpy()
-        action_index = np.argmax(q_values[0])
+        action_index = int(np.argmax(q_values[0]))
         action = np.zeros(self.action_size, dtype=int)
         action[action_index] = 1
         return action
 
-    def train(self, state, action, reward, next_state, done):
+    def train(self, state: np.ndarray, action: np.ndarray | int, reward: float,
+              next_state: np.ndarray, done: bool) -> float | None:
         """
         Store the transition in memory and train the model using experience replay.
         This method uses a mini-batch of past transitions and computes targets using the target network.
@@ -121,9 +125,9 @@ class DQNAgent:
         """
         # Convert one-hot action to index if necessary
         if isinstance(action, np.ndarray) and action.shape == (self.action_size,):
-            action_index = np.argmax(action)
+            action_index = int(np.argmax(action))
         else:
-            action_index = action
+            action_index = int(action)
 
         # Store transition
         self.memory.append((state, action_index, reward, next_state, done))
@@ -168,13 +172,13 @@ class DQNAgent:
 
         return float(loss)
 
-    def update_epsilon(self):
+    def update_epsilon(self) -> None:
         """
         Update the exploration rate using decay.
         """
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
 
-    def save(self, filepath):
+    def save(self, filepath: str) -> None:
         """
         Save the current Q-network to a file.
         """

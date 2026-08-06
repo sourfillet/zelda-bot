@@ -17,7 +17,7 @@ import retro
 GAMES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "games")
 
 
-def main():
+def main() -> int:
     game = sys.argv[1] if len(sys.argv) > 1 else "Zelda"
     print("Games path:", GAMES_DIR)
     retro.data.Integrations.add_custom_path(GAMES_DIR)

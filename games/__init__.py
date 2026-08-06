@@ -11,7 +11,7 @@ from games.base import GameAdapter
 __all__ = ["GameAdapter", "load_adapter"]
 
 
-def load_adapter(name, state=None):
+def load_adapter(name: str, state: str | None = None) -> GameAdapter:
     """Import games/<name>/adapter.py and return its adapter instance."""
     module = importlib.import_module(f"games.{name}.adapter")
     return module.get_adapter(state)

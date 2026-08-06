@@ -1,4 +1,6 @@
 from collections import deque
+from collections.abc import Callable
+from typing import Any
 
 import keras
 import numpy as np
@@ -27,21 +29,21 @@ class SumTree:
       - Indices [capacity-1, 2*capacity-2]: leaves holding priorities
     """
 
-    def __init__(self, capacity):
+    def __init__(self, capacity: int) -> None:
         self.capacity = capacity
         self.tree = np.zeros(2 * capacity - 1, dtype=np.float64)
         self.data = np.zeros(capacity, dtype=object)
         self.write = 0
         self.n_entries = 0
 
-    def _propagate(self, idx, change):
+    def _propagate(self, idx: int, change: float) -> None:
         """Iteratively propagate a priority change up to the root."""
         while idx > 0:
             parent = (idx - 1) // 2
             self.tree[parent] += change
             idx = parent
 
-    def _retrieve(self, idx, s):
+    def _retrieve(self, idx: int, s: float) -> int:
         """Walk the tree from idx to find the leaf whose cumulative priority covers s."""
         while True:
             left = 2 * idx + 1
@@ -55,22 +57,22 @@ class SumTree:
                 idx = right
 
     @property
-    def total(self):
-        return self.tree[0]
+    def total(self) -> float:
+        return float(self.tree[0])
 
-    def add(self, priority, data):
+    def add(self, priority: float, data: Any) -> None:
         idx = self.write + self.capacity - 1
         self.data[self.write] = data
         self.update(idx, priority)
         self.write = (self.write + 1) % self.capacity
         self.n_entries = min(self.n_entries + 1, self.capacity)
 
-    def update(self, idx, priority):
+    def update(self, idx: int, priority: float) -> None:
         change = priority - self.tree[idx]
         self.tree[idx] = priority
         self._propagate(idx, change)
 
-    def get(self, s):
+    def get(self, s: float) -> tuple[int, float, Any]:
         idx = self._retrieve(0, s)
         data_idx = idx - self.capacity + 1
         return idx, self.tree[idx], self.data[data_idx]
@@ -84,7 +86,8 @@ class PrioritizedReplayBuffer:
     Importance-sampling weights correct for the resulting bias.
     """
 
-    def __init__(self, capacity, alpha=0.6, beta=0.4, beta_increment=0.001, epsilon=1e-6):
+    def __init__(self, capacity: int, alpha: float = 0.6, beta: float = 0.4,
+                 beta_increment: float = 0.001, epsilon: float = 1e-6) -> None:
         self.tree = SumTree(capacity)
         self.alpha = alpha          # Prioritization exponent (0=uniform, 1=full)
         self.beta = beta            # IS correction exponent (anneals toward 1.0)
@@ -92,14 +95,14 @@ class PrioritizedReplayBuffer:
         self.epsilon = epsilon      # Minimum priority to prevent zero
         self._max_priority = 1.0
 
-    def __len__(self):
+    def __len__(self) -> int:
         return self.tree.n_entries
 
-    def add(self, transition):
+    def add(self, transition: tuple) -> None:
         """Store transition with the current maximum priority."""
         self.tree.add(self._max_priority, transition)
 
-    def sample(self, batch_size):
+    def sample(self, batch_size: int) -> tuple[list, list[int], np.ndarray]:
         """
         Sample batch_size transitions proportionally to their priorities.
 
@@ -137,7 +140,7 @@ class PrioritizedReplayBuffer:
         self.beta = min(1.0, self.beta + self.beta_increment)
         return batch, indices, is_weights.astype(np.float32)
 
-    def update_priorities(self, indices, td_errors):
+    def update_priorities(self, indices: list[int], td_errors: Any) -> None:
         """Recompute priorities from TD errors and update the SumTree."""
         for idx, td_error in zip(indices, td_errors, strict=False):
             err = abs(float(td_error))
@@ -170,8 +173,9 @@ class RainbowDQNAgent:
     Matches the DQNAgent interface so main.py requires only a new branch.
     """
 
-    def __init__(self, input_shape, action_size, learning_rate, discount_factor,
-                 epsilon, epsilon_decay, epsilon_min):
+    def __init__(self, input_shape: tuple[int, int, int], action_size: int,
+                 learning_rate: float, discount_factor: float, epsilon: float,
+                 epsilon_decay: float, epsilon_min: float) -> None:
         self.input_shape = input_shape  # (height, width, stacked_frames), e.g. (84, 84, 4)
         self.action_size = action_size
         self.learning_rate = learning_rate
@@ -217,7 +221,7 @@ class RainbowDQNAgent:
     # Network construction
     # ------------------------------------------------------------------
 
-    def _build_model(self):
+    def _build_model(self) -> Any:
         """
         Dueling DQN via Keras functional API.
 
@@ -254,7 +258,7 @@ class RainbowDQNAgent:
         )
         return model
 
-    def _build_train_step(self):
+    def _build_train_step(self) -> Callable[[Any, Any, Any], Any]:
         """
         Compile one gradient step into a tf.function.
 
@@ -269,7 +273,7 @@ class RainbowDQNAgent:
         loss_fn = tf.keras.losses.Huber(delta=2.0)
 
         @tf.function(reduce_retracing=True)
-        def train_step(states, targets, weights):
+        def train_step(states: Any, targets: Any, weights: Any) -> Any:
             with tf.GradientTape() as tape:
                 predictions = model(states, training=True)
                 loss = loss_fn(targets, predictions, sample_weight=weights)
@@ -279,7 +283,7 @@ class RainbowDQNAgent:
 
         return train_step
 
-    def _build_soft_update(self):
+    def _build_soft_update(self) -> Callable[[], None]:
         """
         Compile the Polyak update into a single graph.
 
@@ -291,7 +295,7 @@ class RainbowDQNAgent:
         target_weights = self.target_model.weights
 
         @tf.function(reduce_retracing=True)
-        def soft_update():
+        def soft_update() -> None:
             for main_w, target_w in zip(main_weights, target_weights, strict=False):
                 target_w.assign(tau * main_w + (1.0 - tau) * target_w)
 
@@ -301,7 +305,7 @@ class RainbowDQNAgent:
     # Target network update
     # ------------------------------------------------------------------
 
-    def update_target_model(self):
+    def update_target_model(self) -> None:
         """
         Hard copy of main → target weights.
         Called by main.py at startup and after loading a saved model.
@@ -309,7 +313,7 @@ class RainbowDQNAgent:
         """
         self.target_model.set_weights(self.model.get_weights())
 
-    def _soft_update_target(self):
+    def _soft_update_target(self) -> None:
         """Polyak averaging: target = tau * main + (1 - tau) * target."""
         self._soft_update()
 
@@ -317,7 +321,7 @@ class RainbowDQNAgent:
     # Action selection
     # ------------------------------------------------------------------
 
-    def act(self, state):
+    def act(self, state: np.ndarray) -> np.ndarray:
         """
         Epsilon-greedy action selection.
         Returns a one-hot encoded action vector (matches DQNAgent interface).
@@ -336,7 +340,7 @@ class RainbowDQNAgent:
     # n-step bookkeeping
     # ------------------------------------------------------------------
 
-    def _store_n_step(self):
+    def _store_n_step(self) -> None:
         """
         Pop the oldest transition from n_step_buffer, compute the discounted
         n-step return, and store (s_t, a_t, R_n, s_{t+n}, done_n, steps) in the
@@ -373,7 +377,8 @@ class RainbowDQNAgent:
     # Training
     # ------------------------------------------------------------------
 
-    def train(self, state, action, reward, next_state, done):
+    def train(self, state: np.ndarray, action: np.ndarray | int, reward: float,
+              next_state: np.ndarray, done: bool) -> float | None:
         """
         Accumulate n-step transitions, then train from the prioritized buffer.
 
@@ -471,7 +476,7 @@ class RainbowDQNAgent:
     # Epsilon and persistence
     # ------------------------------------------------------------------
 
-    def flush_episode(self):
+    def flush_episode(self) -> None:
         """Flush any remaining transitions in the n-step buffer.
 
         Call this at the end of every episode, even when the episode ends by
@@ -481,10 +486,10 @@ class RainbowDQNAgent:
         while len(self.n_step_buffer) > 0:
             self._store_n_step()
 
-    def update_epsilon(self):
+    def update_epsilon(self) -> None:
         """Decay the exploration rate by the configured multiplier."""
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
 
-    def save(self, filepath):
+    def save(self, filepath: str) -> None:
         """Save the main Q-network weights."""
         self.model.save(filepath)

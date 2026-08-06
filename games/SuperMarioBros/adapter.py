@@ -37,6 +37,8 @@ RAM variables come from retro's data.json:
     xscrollLo/xscrollHi  ($71C / $71A, u1)  screen scroll position
 """
 
+from typing import Any
+
 from games.base import GameAdapter
 
 # ----------------------------------------------------------------------------
@@ -99,6 +101,12 @@ MAX_PLAUSIBLE_STEP = 16
 
 
 class SuperMarioBrosAdapter(GameAdapter):
+    # Per-episode state, declared so the None-then-populate pattern below is
+    # explicit about what each field eventually holds.
+    old_info: dict[str, Any] | None
+    start_lives: int | None
+    start_level: tuple[int, int] | None
+
     name = "SuperMarioBros"
     retro_name = "SuperMarioBros-Nes"
     default_state = "Level1-1"
@@ -106,7 +114,7 @@ class SuperMarioBrosAdapter(GameAdapter):
     actions_released = ACTIONS_RELEASED
     log_fields = ["max_x", "level", "coins", "completed"]
 
-    def __init__(self, state=None):
+    def __init__(self, state: str | None = None) -> None:
         self.state = state or self.default_state
         self._completed = False
         self.reset()
@@ -115,7 +123,7 @@ class SuperMarioBrosAdapter(GameAdapter):
     # Per-episode lifecycle
     # ------------------------------------------------------------------
 
-    def reset(self):
+    def reset(self) -> None:
         self.old_info = None
         # Furthest point reached this episode; progress is rewarded against
         # this rather than against the previous frame, so oscillating in place
@@ -126,7 +134,7 @@ class SuperMarioBrosAdapter(GameAdapter):
         self.episode_coins = 0
         self._completed = False
 
-    def step(self, info, frame):
+    def step(self, info: dict[str, Any], frame: int) -> tuple[float, bool]:
         """One emulated frame -> (reward, done)."""
         x = self._x_position(info)
 
@@ -175,8 +183,8 @@ class SuperMarioBrosAdapter(GameAdapter):
         self.old_info = info
         return reward, False
 
-    def episode_stats(self):
-        level = self.old_info if self.old_info else {}
+    def episode_stats(self) -> dict[str, Any]:
+        level: dict[str, Any] = self.old_info if self.old_info else {}
         return {
             "max_x": self.max_x,
             "level": f"{level.get('levelHi', 0)}-{level.get('levelLo', 0)}",
@@ -184,7 +192,7 @@ class SuperMarioBrosAdapter(GameAdapter):
             "completed": int(self._completed),
         }
 
-    def summary_line(self):
+    def summary_line(self) -> str:
         done = " - LEVEL COMPLETE!" if self._completed else ""
         return f"Distance: {self.max_x}  Coins: {self.episode_coins}{done}"
 
@@ -193,7 +201,7 @@ class SuperMarioBrosAdapter(GameAdapter):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _x_position(info):
+    def _x_position(info: dict[str, Any]) -> int:
         """Screen scroll position as a single number.
 
         These are the screen-edge registers ($71A page / $71C offset), i.e. the
@@ -217,5 +225,5 @@ class SuperMarioBrosAdapter(GameAdapter):
         return (info["xscrollHi"] << 8) | info["xscrollLo"]
 
 
-def get_adapter(state=None):
+def get_adapter(state: str | None = None) -> "SuperMarioBrosAdapter":
     return SuperMarioBrosAdapter(state)

@@ -8,6 +8,8 @@ Current training target: the ``monsters`` state — a single isolated combat roo
 where the agent learns to kill enemies. Kill is the dominant reward signal.
 """
 
+from typing import Any
+
 from games.base import GameAdapter
 
 # ----------------------------------------------------------------------------
@@ -83,13 +85,13 @@ SINGLE_PICKUP_ITEMS = [
 MULTI_PICKUP_ITEMS = ["Arrow", "Bombs", "Keys", "Rupees"]
 
 
-def get_actual_hearts(containers=0, partial=0):
+def get_actual_hearts(containers: int = 0, partial: int = 0) -> float:
     """Decode Link's current health from the two heart bytes.
 
     $066F ("Heart Containers"): low nibble = filled hearts, high nibble = containers - 1
     $0670 ("Hearts"):           partial heart (0 = empty, 1-0x7F = half, 0x80-0xFF = full)
     """
-    filled = containers & 0x0F
+    filled = float(containers & 0x0F)
     if partial >= 0x80:
         filled += 1.0
     elif partial > 0:
@@ -97,23 +99,29 @@ def get_actual_hearts(containers=0, partial=0):
     return filled
 
 
-def calculate_difference(old, new, list_of_items):
+def calculate_difference(old: dict[str, Any], new: dict[str, Any], list_of_items: list[str]) -> float:
     """Sum the absolute change of each named item between two info dicts."""
     return sum(abs(old[item] - new[item]) for item in list_of_items)
 
 
 class ZeldaAdapter(GameAdapter):
+    # Per-episode state, declared so the None-then-populate pattern below is
+    # explicit about what each field eventually holds.
+    old_info: dict[str, Any] | None
+    visited_rooms: dict[int, dict[tuple[int, int], int]]
+    start_kills: int | None
+
     name = "Zelda"
     default_state = "monsters"
     actions = ACTIONS
     actions_released = ACTIONS_RELEASED
     log_fields = ["kills", "kills_avg", "cleared"]
 
-    def __init__(self, state=None):
+    def __init__(self, state: str | None = None) -> None:
         # Start state matters for the dungeon-in-overworld penalty.
         self.state = state or self.default_state
         # Moving-average history of kills across episodes.
-        self._kill_history = []
+        self._kill_history: list[int] = []
         self._cleared = False
         self.reset()
 
@@ -121,7 +129,7 @@ class ZeldaAdapter(GameAdapter):
     # Per-episode lifecycle
     # ------------------------------------------------------------------
 
-    def reset(self):
+    def reset(self) -> None:
         self.old_info = None
         self.visited_rooms = {}
         # Lifetime kill counter ($52A) survives death/room transitions, so we
@@ -130,7 +138,7 @@ class ZeldaAdapter(GameAdapter):
         self.start_spawned = 0
         self.episode_kills = 0
 
-    def step(self, info, frame):
+    def step(self, info: dict[str, Any], frame: int) -> tuple[float, bool]:
         """One emulated frame -> (reward, done)."""
         if self.start_kills is None:
             self.start_kills = info["Enemies Killed"]
@@ -157,7 +165,7 @@ class ZeldaAdapter(GameAdapter):
             reward = 0.0
         return reward, False
 
-    def episode_stats(self):
+    def episode_stats(self) -> dict[str, Any]:
         self._kill_history.append(self.episode_kills)
         window = min(10, len(self._kill_history))
         kills_avg = sum(self._kill_history[-window:]) / window
@@ -168,7 +176,7 @@ class ZeldaAdapter(GameAdapter):
             "cleared": int(self._cleared),
         }
 
-    def summary_line(self):
+    def summary_line(self) -> str:
         cleared = " - ROOM CLEARED!" if self._cleared else ""
         return f"Kills: {self.episode_kills}/{self.start_spawned}{cleared}"
 
@@ -176,7 +184,7 @@ class ZeldaAdapter(GameAdapter):
     # Reward shaping (normal-play frames)
     # ------------------------------------------------------------------
 
-    def _frame_reward(self, info):
+    def _frame_reward(self, info: dict[str, Any]) -> float:
         """Reward for a single normal-play frame; updates old_info/visited_rooms."""
         if self.old_info is None:
             self.old_info = info
@@ -224,5 +232,5 @@ class ZeldaAdapter(GameAdapter):
         return reward
 
 
-def get_adapter(state=None):
+def get_adapter(state: str | None = None) -> "ZeldaAdapter":
     return ZeldaAdapter(state)

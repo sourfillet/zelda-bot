@@ -39,9 +39,11 @@ exclude = "(archive|zelda_env|\\.venv)/"
 explicit_package_bases = true
 mypy_path = "."
 
-# This is a numeric codebase with no annotations yet, so the value here is in
-# catching real mistakes -- typos, bad attribute access, unreachable branches --
-# not in enforcing full coverage. Untyped function bodies are still checked.
+# Every function in the project is annotated, so require it of new ones too --
+# otherwise coverage silently rots back. Third-party calls still return Any
+# (no stubs for retro/tf/cv2), which is why the disallow_any_* knobs stay off.
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
 check_untyped_defs = true
 warn_redundant_casts = true
 warn_unused_ignores = true

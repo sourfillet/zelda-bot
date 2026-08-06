@@ -7,6 +7,7 @@ import os
 import re
 import sys
 from collections import deque
+from typing import Any
 
 import cv2
 import numpy as np
@@ -14,6 +15,7 @@ import retro
 import tensorflow as tf  # noqa: F401  (kept for the debug switches below)
 
 from games import load_adapter
+from games.base import GameAdapter
 from models.DoubleDQN import DoubleDQNAgent
 from models.DQN import DQNAgent
 from models.RainbowDQN import RainbowDQNAgent
@@ -32,25 +34,25 @@ INPUT_SHAPE = (84, 84, 4)
 # action set and the back-half "released" variant for edge-triggered buttons.
 FRAME_SKIP = 4
 
-def preprocess_frame(obs):
+def preprocess_frame(obs: np.ndarray | tuple) -> np.ndarray:
     """
     Preprocess a single observation: resize to 84x84 and convert to grayscale.
     Returns shape (84, 84, 1).
     """
-    if isinstance(obs, tuple):
-        obs = obs[0]
-    obs = cv2.resize(obs, (84, 84))
-    obs = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY)
-    return np.reshape(obs, [84, 84, 1])
+    # env.reset() returns (obs, info) while env.step() returns the array directly
+    frame: np.ndarray = obs[0] if isinstance(obs, tuple) else obs
+    frame = cv2.resize(frame, (84, 84))
+    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+    return np.reshape(frame, [84, 84, 1])
 
-def get_stacked_state(frame_stack):
+def get_stacked_state(frame_stack: deque) -> np.ndarray:
     """
     Concatenate 4 frames along the channel axis.
     Returns shape (1, 84, 84, 4) for batch inference.
     """
     return np.reshape(np.concatenate(list(frame_stack), axis=2), [1, 84, 84, 4])
 
-def clip_reward(reward, limit):
+def clip_reward(reward: float, limit: float | None) -> float:
     """
     Clamp a per-decision reward to +/- limit; a non-positive limit disables it.
 
@@ -62,7 +64,7 @@ def clip_reward(reward, limit):
         return reward
     return max(-limit, min(limit, reward))
 
-def load_config(config_file):
+def load_config(config_file: str) -> dict[str, Any]:
     """
     Load configuration parameters from a JSON file.
     """
@@ -73,7 +75,7 @@ def load_config(config_file):
         print(f"Config file {config_file} not found. Using default parameters.")
         return {}
 
-def parse_arguments():
+def parse_arguments() -> argparse.Namespace:
     """
     Parse command-line arguments and return the arguments object.
     """
@@ -142,7 +144,8 @@ def parse_arguments():
         args.state = config_defaults.get('state')
     return args
 
-def get_video_writer(episode, frame_size, run_dir, fps=30):
+def get_video_writer(episode: int, frame_size: tuple[int, int], run_dir: str,
+                     fps: int = 30) -> Any:
     """
     Create a VideoWriter for one episode inside this run's recordings folder.
 
@@ -157,7 +160,7 @@ def get_video_writer(episode, frame_size, run_dir, fps=30):
 
 RUNS_ROOT = "runs"
 
-def create_run_dir(game, model, state, root=RUNS_ROOT):
+def create_run_dir(game: str, model: str, state: str, root: str = RUNS_ROOT) -> str:
     """
     Make runs/<game>/<timestamp>__<model>__<state>/ with its subfolders.
 
@@ -172,7 +175,7 @@ def create_run_dir(game, model, state, root=RUNS_ROOT):
     os.makedirs(os.path.join(run_dir, "recordings"), exist_ok=True)
     return run_dir
 
-def _git_commit():
+def _git_commit() -> str | None:
     """Short commit hash, or None outside a git checkout."""
     try:
         import subprocess
@@ -182,7 +185,8 @@ def _git_commit():
     except Exception:
         return None
 
-def write_run_config(run_dir, args, adapter, action_size, state):
+def write_run_config(run_dir: str, args: argparse.Namespace, adapter: GameAdapter,
+                     action_size: int, state: str) -> dict[str, Any]:
     """
     Snapshot everything needed to interpret or reproduce this run.
 
@@ -209,7 +213,8 @@ def write_run_config(run_dir, args, adapter, action_size, state):
         json.dump(config, f, indent=2)
     return config
 
-def append_run_index(run_dir, config, root=RUNS_ROOT):
+def append_run_index(run_dir: str, config: dict[str, Any],
+                     root: str = RUNS_ROOT) -> None:
     """Register the run in runs/index.csv so runs are discoverable in one place."""
     index = os.path.join(root, "index.csv")
     columns = ["started", "game", "model", "state", "num_episodes", "git_commit", "run_dir"]
@@ -221,7 +226,9 @@ def append_run_index(run_dir, config, root=RUNS_ROOT):
         writer.writerow([config["started"], config["game"], config["model"], config["state"],
                          config["args"].get("num_episodes"), config["git_commit"], run_dir])
 
-def update_run_summary(run_dir, episode, episode_reward, best_reward, max_abs_q, stats):
+def update_run_summary(run_dir: str, episode: int, episode_reward: float,
+                       best_reward: float, max_abs_q: float,
+                       stats: dict[str, Any]) -> None:
     """Rewrite this run's summary.json — cheap, and survives an interrupted run."""
     summary = {
         "updated": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -234,7 +241,7 @@ def update_run_summary(run_dir, episode, episode_reward, best_reward, max_abs_q,
     with open(os.path.join(run_dir, "summary.json"), "w") as f:
         json.dump(summary, f, indent=2)
 
-def register_integrations():
+def register_integrations() -> str:
     """
     Make games/ visible to retro, alongside its own bundled integrations.
     Safe to call more than once.
@@ -244,7 +251,8 @@ def register_integrations():
     retro.data.Integrations.add_custom_path(games_path)
     return games_path
 
-def resolve_state(game, state, default_state, from_cli):
+def resolve_state(game: str, state: str | None, default_state: str | None,
+                  from_cli: bool) -> str:
     """
     Pick a start state that actually exists for `game`.
 
@@ -259,7 +267,7 @@ def resolve_state(game, state, default_state, from_cli):
     """
     available = retro.data.list_states(game, inttype=retro.data.Integrations.ALL)
     if state in available:
-        return state
+        return str(state)
 
     if from_cli:
         raise SystemExit(
@@ -273,9 +281,9 @@ def resolve_state(game, state, default_state, from_cli):
             f"Default state {default_state!r} does not exist for {game} either.\n"
             f"Available states: {', '.join(sorted(available)) or '(none found)'}"
         )
-    return default_state
+    return str(default_state)
 
-def integrate(game, state=retro.State.DEFAULT, render=False):
+def integrate(game: str, state: Any = retro.State.DEFAULT, render: bool = False) -> Any:
     """
     Build the retro environment for `game`. Call register_integrations() first.
 
@@ -290,7 +298,8 @@ def integrate(game, state=retro.State.DEFAULT, render=False):
     return retro.make(game, state=state, inttype=retro.data.Integrations.ALL,
                       render_mode="human" if render else None)
 
-def save_model(agent, episode, run_dir, is_best=False):
+def save_model(agent: DQNAgent | RainbowDQNAgent, episode: int, run_dir: str,
+               is_best: bool = False) -> str:
     """
     Save a checkpoint into this run's checkpoints/ folder.
 
@@ -313,7 +322,8 @@ def save_model(agent, episode, run_dir, is_best=False):
 BASE_LOG_COLUMNS = ['episode', 'episode_reward', 'moving_avg', 'avg_loss', 'max_q', 'epsilon',
                     'frames', 'training_steps', 'replay_buffer_size']
 
-def log_episode_stats(columns, values, log_file="training_log.csv"):
+def log_episode_stats(columns: list[str], values: dict[str, Any],
+                      log_file: str = "training_log.csv") -> None:
     """
     Log episode statistics to a CSV file for later analysis.
     Creates the file with headers if it doesn't exist. If an existing file has
@@ -342,7 +352,7 @@ def log_episode_stats(columns, values, log_file="training_log.csv"):
             writer.writerow(columns)
         writer.writerow([values[c] for c in columns])
 
-def find_latest_checkpoint(game, root=RUNS_ROOT):
+def find_latest_checkpoint(game: str, root: str = RUNS_ROOT) -> str | None:
     """
     Newest checkpoint belonging to `game`, across that game's previous runs.
 
@@ -356,7 +366,7 @@ def find_latest_checkpoint(game, root=RUNS_ROOT):
     instead is wrong the moment a run directory is copied or moved, since that
     rewrites ctime on every file at once.
     """
-    def episode_of(path):
+    def episode_of(path: str) -> int:
         m = re.search(r"episode(\d+)", os.path.basename(path))
         return int(m.group(1)) if m else -1
 
@@ -366,7 +376,7 @@ def find_latest_checkpoint(game, root=RUNS_ROOT):
             return max(files, key=episode_of)
     return None
 
-def load_model_into_agent(agent, model_file):
+def load_model_into_agent(agent: DQNAgent | RainbowDQNAgent, model_file: str) -> str:
     """
     Load weights from a saved model file into the agent's existing model.
     Supports .keras (preferred) and legacy .h5 files.
@@ -378,7 +388,7 @@ def load_model_into_agent(agent, model_file):
     print("Model loaded from:", model_file)
     return model_file
 
-def main():
+def main() -> None:
     args = parse_arguments()
 
     print("Arguments:")
@@ -400,7 +410,7 @@ def main():
     env = integrate(adapter.integration_name, state_name, render=args.render)
     action_size = len(adapter.actions)
     log_columns = BASE_LOG_COLUMNS + list(adapter.log_fields) + ['timestamp']
-    total_rewards = 0
+    total_rewards = 0.0
 
     # Everything this run produces goes in one directory.
     run_dir = create_run_dir(args.game, args.model, state_name)
@@ -464,7 +474,7 @@ def main():
         state = get_stacked_state(frame_stack)
 
         # Initialize per-episode reward counter.
-        episode_reward = 0
+        episode_reward = 0.0
 
         # Create a video writer for this episode (only if it's a recording episode)
         writer = None
@@ -474,13 +484,13 @@ def main():
             writer = get_video_writer(episode, (width, height), run_dir, fps=30)
 
         frame_count = 0  # Frame counter for this episode
-        episode_loss = 0  # Track total loss for this episode
+        episode_loss = 0.0  # Track total loss for this episode
         training_steps = 0  # Count training steps in this episode
 
         while not done and frame_count < args.max_frames:
             action = agent.act(state)
             action_index = int(np.argmax(action))
-            reward = 0
+            reward = 0.0
 
             # Repeat the chosen action for FRAME_SKIP frames, accumulating every
             # frame's reward into the single stored transition. Acting once per
