@@ -26,10 +26,9 @@ REWARD_VALUES = {
     # and room discoveries at +-1. A one-off keeps the signal without letting
     # episode length set its size.
     'left_dungeon': -1.0,
-    # Link has spent OVERWORLD_PATIENCE consecutive frames outside the dungeon
-    # he was loaded into: he has abandoned the objective, so end the episode.
-    # Sized to match `leave_start_room`, which gates the confined states the
-    # same way.
+    # Link left the dungeon he was loaded into: the objective is that dungeon,
+    # so the episode is over. Sized to match `leave_start_room`, which gates the
+    # confined states the same way.
     'abandon_dungeon': -5.0,
     # Link leaves the room he started in. Only charged in confined mode, where
     # the point of the episode is to stay and fight (the `monsters` state).
@@ -92,22 +91,24 @@ ACTIONS_RELEASED = [[0] + a[1:8] + [0] for a in ACTIONS]
 # hundred cells and a thorough sweep is worth roughly a handful of kills.
 TILE = 8
 
-# Consecutive frames in the overworld before a dungeon episode is abandoned.
-# Not zero, because a hard gate starves early training: a random policy walks
-# out of level1 in a median of 596 frames (12/12 episodes, min 119), so ending
-# on the first boundary cross would cap every warmup episode at ~600 frames
-# instead of 10,000 and the buffer would fill with doorway, not dungeon.
+# Normal-play frames in the overworld before a dungeon episode ends. 1 = end on
+# the transition itself, which is the analogue of `leave_start_room`.
 #
-# 300 works because trips outside are bimodal. Measured over 8 random episodes,
-# 61 trips: median 204 frames, 90th percentile 387, max 7617 — thresholds of
-# 600 and 900 catch the identical 5 trips, so there is a clean gap between the
-# accidental bounce and the committed departure.
+# It has to be immediate, because the overworld is not a distraction from the
+# reward — under random play it is the ONLY source of it. Measured over 8
+# episodes: 0 kills inside the dungeon across 33,584 frames, 8 kills outside
+# across 46,416. Level 1's entrance room is empty and Link starts at the door,
+# so the nearest reward and the only reward are both outside.
 #
-# That ends 13% of *trips*, but 6 of 10 *episodes* at epsilon=1.0, since one
-# long wander is enough to end an episode. Median episode 4534 frames vs ~596
-# for a hard gate. The rate should fall as the agent learns, because the
-# overworld pays nothing and now costs the rest of the episode too.
-OVERWORLD_PATIENCE = 300
+# A grace period is therefore worse than useless: it is exactly long enough to
+# bank an overworld kill before the penalty lands, and at gamma=0.99 a penalty
+# 300 frames (~75 decisions) downstream arrives at ~0.47 strength. Ending on the
+# transition puts it on the causal decision at full value.
+#
+# Safe against false positives because `_frame_reward` only runs on NORMAL_MODE
+# frames — door, stair and scroll animations return earlier in step(), so an
+# in-dungeon transition can never trip this.
+OVERWORLD_PATIENCE = 1
 
 # ----------------------------------------------------------------------------
 # HUD planes
@@ -385,14 +386,17 @@ class ZeldaAdapter(GameAdapter):
                 self.tiles_found += 1
 
         # Committed to the overworld rather than briefly clipping the boundary.
-        if self.frames_outside >= OVERWORLD_PATIENCE:
+        if not on_task and self.frames_outside >= OVERWORLD_PATIENCE:
             self.abandoned = True
             reward += REWARD_VALUES['abandon_dungeon']
 
         # Time is never free.
         reward += REWARD_VALUES['time_cost']
 
-        if info['Enemies Killed'] > old_info['Enemies Killed']:
+        # Only on-task kills pay. Overworld enemies are the dominant hole
+        # otherwise: they are the single largest reward in the table and,
+        # measured under random play, the only kills that ever happen.
+        if on_task and info['Enemies Killed'] > old_info['Enemies Killed']:
             reward += REWARD_VALUES['kill_enemy']
 
         # REWARD_VALUES['death'] is already negative — add it. The counter is
