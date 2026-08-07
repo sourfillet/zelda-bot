@@ -26,6 +26,11 @@ REWARD_VALUES = {
     # and room discoveries at +-1. A one-off keeps the signal without letting
     # episode length set its size.
     'left_dungeon': -1.0,
+    # Link has spent OVERWORLD_PATIENCE consecutive frames outside the dungeon
+    # he was loaded into: he has abandoned the objective, so end the episode.
+    # Sized to match `leave_start_room`, which gates the confined states the
+    # same way.
+    'abandon_dungeon': -5.0,
     # Link leaves the room he started in. Only charged in confined mode, where
     # the point of the episode is to stay and fight (the `monsters` state).
     'leave_start_room': -5.0,
@@ -86,6 +91,23 @@ ACTIONS_RELEASED = [[0] + a[1:8] + [0] for a in ACTIONS]
 # +83, against +5 for clearing a whole room. On an 8px grid a room holds a few
 # hundred cells and a thorough sweep is worth roughly a handful of kills.
 TILE = 8
+
+# Consecutive frames in the overworld before a dungeon episode is abandoned.
+# Not zero, because a hard gate starves early training: a random policy walks
+# out of level1 in a median of 596 frames (12/12 episodes, min 119), so ending
+# on the first boundary cross would cap every warmup episode at ~600 frames
+# instead of 10,000 and the buffer would fill with doorway, not dungeon.
+#
+# 300 works because trips outside are bimodal. Measured over 8 random episodes,
+# 61 trips: median 204 frames, 90th percentile 387, max 7617 — thresholds of
+# 600 and 900 catch the identical 5 trips, so there is a clean gap between the
+# accidental bounce and the committed departure.
+#
+# That ends 13% of *trips*, but 6 of 10 *episodes* at epsilon=1.0, since one
+# long wander is enough to end an episode. Median episode 4534 frames vs ~596
+# for a hard gate. The rate should fall as the agent learns, because the
+# overworld pays nothing and now costs the rest of the episode too.
+OVERWORLD_PATIENCE = 300
 
 # ----------------------------------------------------------------------------
 # HUD planes
@@ -221,6 +243,9 @@ class ZeldaAdapter(GameAdapter):
         self.rooms_found = 0
         self.tiles_found = 0
         self.died = False
+        self.abandoned = False
+        # Consecutive frames spent in the overworld; see OVERWORLD_PATIENCE.
+        self.frames_outside = 0
         # Lifetime kill counter ($52A) survives death/room transitions, so we
         # track kills as a delta from the episode's first observed value.
         self.start_kills = None
@@ -258,7 +283,7 @@ class ZeldaAdapter(GameAdapter):
         # to move. `time_cost` charges every frame uniformly instead, so there is
         # nothing to suppress.
         reward = self._frame_reward(info)
-        return reward, self.died
+        return reward, self.died or self.abandoned
 
     def extra_observation(self, frame: Any, size: int = 84) -> Any:
         """Slice the HUD band into columns, each upscaled to its own plane."""
@@ -333,6 +358,7 @@ class ZeldaAdapter(GameAdapter):
         # the reward is unbounded — so the fix is to stop paying rather than to
         # out-bid our own bonus with a bigger penalty.
         on_task = not (self.state in DUNGEON_SAVE_STATES and int(info['Level']) < 1)
+        self.frames_outside = 0 if on_task else self.frames_outside + 1
 
         if info['Room'] not in self.visited_rooms:
             self.visited_rooms[info['Room']] = {}
@@ -357,6 +383,11 @@ class ZeldaAdapter(GameAdapter):
                 self._tile_counts[key] = count
                 reward += REWARD_VALUES['movement'] / math.sqrt(count)
                 self.tiles_found += 1
+
+        # Committed to the overworld rather than briefly clipping the boundary.
+        if self.frames_outside >= OVERWORLD_PATIENCE:
+            self.abandoned = True
+            reward += REWARD_VALUES['abandon_dungeon']
 
         # Time is never free.
         reward += REWARD_VALUES['time_cost']

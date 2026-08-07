@@ -8,7 +8,7 @@
     "epsilon": 1.0,
     "epsilon_decay": 0.9908,
     "epsilon_min": 0.01,
-    "max_frames": 10000,
+    "max_frames": 5000,
     "input_size": 128,
-    "extra_planes": 3
+    "extra_planes": 0
 }
