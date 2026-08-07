@@ -44,16 +44,26 @@ REWARD_VALUES = {
     'movement': 0.05,
     # Charged every frame. Without it, loitering in an exhausted room is free
     # rather than merely unprofitable, and episodes run to max_frames doing
-    # nothing. Sized so a full 10k-frame episode costs about -3, comparable to
-    # three kills, so wasting the clock is real but not dominant.
-    'time_cost': -0.0003,
+    # nothing.
+    #
+    # Bounded by the suicide constraint, not by taste. Ending an episode stops
+    # the clock, so if accumulated time cost can exceed the death penalty then
+    # dying is the cheapest way to stop paying it. Discounting caps the
+    # accumulation at `time_cost * FRAME_SKIP / (1 - discount_factor)`, so the
+    # requirement is that this stays smaller than the death penalty. It was
+    # -0.0003, giving -0.120 against a -0.05 death: dying won by 0.07.
+    'time_cost': -0.0001,
     # Killing an enemy (PRIMARY goal — kept dominant)
     'kill_enemy': 1.0,
     # Heart changes
     'heart_loss': -0.01,
     'heart_gain': 0.01,
-    # Death
-    'death': -0.05,
+    # Death. Must outweigh the discounted time cost of playing an episode out,
+    # or death becomes a shortcut — see `time_cost`. Cannot be fixed by making
+    # this arbitrarily large: `reward_clip` caps a single event at +-1.0 while
+    # per-frame costs accumulate uncapped, so -1.0 is the most that survives
+    # clipping and the time cost is the side that has to move.
+    'death': -1.0,
     # Item pickup (per item)
     'item_pickup': 0.01,
 }

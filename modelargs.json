@@ -9,6 +9,6 @@
     "epsilon_decay": 0.9908,
     "epsilon_min": 0.01,
     "max_frames": 5000,
-    "input_size": 128,
-    "extra_planes": 0
+    "input_size": 84,
+    "extra_planes": 3
 }
