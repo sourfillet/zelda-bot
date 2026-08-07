@@ -326,12 +326,20 @@ class ZeldaAdapter(GameAdapter):
         elif info['Hearts'] > old_info['Hearts']:
             reward += REWARD_VALUES['heart_gain']
 
+        # Exploration is only paid where the objective is. When a dungeon state
+        # is loaded, the overworld is off-task: 128 rooms of never-before-seen
+        # ground, every one of them worth `new_room` plus a full-rate tile sweep.
+        # A one-off exit penalty cannot compete with that — it is paid once and
+        # the reward is unbounded — so the fix is to stop paying rather than to
+        # out-bid our own bonus with a bigger penalty.
+        on_task = not (self.state in DUNGEON_SAVE_STATES and int(info['Level']) < 1)
+
         if info['Room'] not in self.visited_rooms:
             self.visited_rooms[info['Room']] = {}
             # The starting room is seeded below on the first frame, so reaching
             # this branch means a genuinely new room. Confined episodes never
             # get here (they terminate mid-scroll).
-            if not self.confined:
+            if not self.confined and on_task:
                 self.rooms_found += 1
                 reward += REWARD_VALUES['new_room']
 
@@ -343,11 +351,12 @@ class ZeldaAdapter(GameAdapter):
         tile = (int(info['Link X']) // TILE, int(info['Link Y']) // TILE)
         if tile not in self.visited_rooms[room]:
             self.visited_rooms[room][tile] = 1
-            key = (int(room), tile[0], tile[1])
-            count = self._tile_counts.get(key, 0) + 1
-            self._tile_counts[key] = count
-            reward += REWARD_VALUES['movement'] / math.sqrt(count)
-            self.tiles_found += 1
+            if on_task:
+                key = (int(room), tile[0], tile[1])
+                count = self._tile_counts.get(key, 0) + 1
+                self._tile_counts[key] = count
+                reward += REWARD_VALUES['movement'] / math.sqrt(count)
+                self.tiles_found += 1
 
         # Time is never free.
         reward += REWARD_VALUES['time_cost']
