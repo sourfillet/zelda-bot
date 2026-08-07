@@ -378,7 +378,7 @@ class RainbowDQNAgent:
     # ------------------------------------------------------------------
 
     def train(self, state: np.ndarray, action: np.ndarray | int, reward: float,
-              next_state: np.ndarray, done: bool) -> float | None:
+              next_state: np.ndarray, done: bool, learn: bool = True) -> float | None:
         """
         Accumulate n-step transitions, then train from the prioritized buffer.
 
@@ -410,6 +410,12 @@ class RainbowDQNAgent:
         if done:
             while len(self.n_step_buffer) > 0:
                 self._store_n_step()
+
+        # main.py may store a transition without taking a gradient step, so the
+        # replay buffer still sees every decision while training runs at a lower
+        # frequency. Skipping the store instead would silently discard data.
+        if not learn:
+            return None
 
         # Wait for enough samples
         if len(self.memory) < self.train_start:

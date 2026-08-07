@@ -8,6 +8,7 @@ Current training target: the ``monsters`` state — a single isolated combat roo
 where the agent learns to kill enemies. Kill is the dominant reward signal.
 """
 
+import math
 from typing import Any
 
 import cv2
@@ -19,8 +20,12 @@ from games.base import GameAdapter
 # Reward constants (kill is the dominant signal)
 # ----------------------------------------------------------------------------
 REWARD_VALUES = {
-    # A level state is loaded but Link is in the overworld
-    'level_state_in_overworld': -0.02,
+    # Charged ONCE when Link walks out of the dungeon he was loaded into, not
+    # per frame. As a per-frame charge it was -0.02 x however long he stayed
+    # out: measured over -100 on a single 10k-frame episode, which buried kills
+    # and room discoveries at +-1. A one-off keeps the signal without letting
+    # episode length set its size.
+    'left_dungeon': -1.0,
     # Link leaves the room he started in. Only charged in confined mode, where
     # the point of the episode is to stay and fight (the `monsters` state).
     'leave_start_room': -5.0,
@@ -28,10 +33,16 @@ REWARD_VALUES = {
     # exploration is the objective in a dungeon, not a failure. Sized to match
     # a kill so discovery and combat pull with comparable force.
     'new_room': 1.0,
-    # Link moves to a new position in the room
+    # Coefficient for the exploration bonus. The payout for reaching a tile is
+    # movement / sqrt(N), where N is how many times that tile has ever been
+    # reached this process — so a fresh room pays near full rate and the hub
+    # room's 78th sweep pays about a ninth of its first.
     'movement': 0.05,
-    # Link revisits a position (penalty for getting stuck)
-    'repeat_state': -0.0005,
+    # Charged every frame. Without it, loitering in an exhausted room is free
+    # rather than merely unprofitable, and episodes run to max_frames doing
+    # nothing. Sized so a full 10k-frame episode costs about -3, comparable to
+    # three kills, so wasting the clock is real but not dominant.
+    'time_cost': -0.0003,
     # Killing an enemy (PRIMARY goal — kept dominant)
     'kill_enemy': 1.0,
     # Heart changes
@@ -69,6 +80,13 @@ ACTIONS = [
 # press. Directions stay held (movement is level-triggered).
 ACTIONS_RELEASED = [[0] + a[1:8] + [0] for a in ACTIONS]
 
+# Position is quantized to TILE-square cells before being counted. Rewarding
+# distinct (Link X, Link Y) pixel pairs made sub-pixel jitter look like
+# exploration: a 10k-frame level1 episode logged ~1,658 "discoveries" worth
+# +83, against +5 for clearing a whole room. On an 8px grid a room holds a few
+# hundred cells and a thorough sweep is worth roughly a handful of kills.
+TILE = 8
+
 # ----------------------------------------------------------------------------
 # HUD planes
 # ----------------------------------------------------------------------------
@@ -94,6 +112,21 @@ HUD_COLUMNS = 3
 # Anything else (death sequence, game over) terminates the episode.
 SCROLL_MODES = (4, 6, 7)
 NORMAL_MODE = 5
+
+# Death, per RAM_MAP.md: Game Mode goes 5 -> 17 -> 8 when Link dies. The
+# `Deaths` counter is checked as well, since it is unambiguous.
+DEATH_MODES = (8, 17)
+
+# Everything else non-normal is a transition animation — doors, stairs, cave
+# entries, the tail of a room scroll. Measured over 6000 uninterrupted frames on
+# level1: mode 3 runs ~87 frames, mode 16 ~64, mode 4 ~62, mode 2 exactly 19,
+# and every spell returns to mode 5. Modes 8 and 17 never appeared.
+#
+# This used to be treated as death and ended the episode, which meant the run
+# was cut short *precisely when the agent reached a door* — 25% of episodes in
+# one level1 run ended under 600 frames while 66% hit the 10k cap. The bug was
+# invisible in the `monsters` room, where the episode ended on scroll before any
+# of these modes could appear.
 
 # States where the episode is meant to stay on one screen. `monsters` is the
 # isolated combat room; everything else (a dungeon entrance, the overworld) is
@@ -142,6 +175,7 @@ class ZeldaAdapter(GameAdapter):
     # Per-episode state, declared so the None-then-populate pattern below is
     # explicit about what each field eventually holds.
     old_info: dict[str, Any] | None
+    # room -> {(tile_x, tile_y): 1} for this episode only
     visited_rooms: dict[int, dict[tuple[int, int], int]]
     start_kills: int | None
 
@@ -149,7 +183,7 @@ class ZeldaAdapter(GameAdapter):
     default_state = "monsters"
     actions = ACTIONS
     actions_released = ACTIONS_RELEASED
-    log_fields = ["kills", "kills_avg", "cleared", "rooms"]
+    log_fields = ["kills", "kills_avg", "cleared", "rooms", "tiles"]
     # One plane per HUD column. Set to 0 to train on the playfield alone --
     # changing this changes the network's input shape, so checkpoints do not
     # load across the switch.
@@ -164,6 +198,11 @@ class ZeldaAdapter(GameAdapter):
         self.confined = self.state in CONFINED_STATES
         # Moving-average history of kills across episodes.
         self._kill_history: list[int] = []
+        # Lifetime visit counts, keyed (room, tile_x, tile_y). Deliberately NOT
+        # cleared in reset(): the whole point is that the bonus decays across
+        # episodes, so re-walking the starting room stops paying. Lives for the
+        # process, not across separate runs.
+        self._tile_counts: dict[tuple[int, int, int], int] = {}
         self._cleared = False
         self.reset()
 
@@ -180,6 +219,8 @@ class ZeldaAdapter(GameAdapter):
         # check: the starting room is never "new", whichever room it is.
         self.start_room: int | None = None
         self.rooms_found = 0
+        self.tiles_found = 0
+        self.died = False
         # Lifetime kill counter ($52A) survives death/room transitions, so we
         # track kills as a delta from the episode's first observed value.
         self.start_kills = None
@@ -203,17 +244,21 @@ class ZeldaAdapter(GameAdapter):
             if self.confined and self.old_info is not None:
                 return REWARD_VALUES['leave_start_room'], True
             return 0.0, False
-        if mode != NORMAL_MODE:
-            # Death / game over — penalize and end rather than fill the replay
-            # buffer with game-over frames.
+        if mode in DEATH_MODES:
+            # Real death: penalize and end rather than fill the replay buffer
+            # with game-over frames.
             return REWARD_VALUES['death'], True
+        if mode != NORMAL_MODE:
+            # A transition animation. Link is not controllable and nothing here
+            # is worth scoring, but it is not the end of the episode either.
+            return 0.0, False
 
+        # The old 200-frame grace period is gone with `repeat_state`: it existed
+        # to stop a per-frame stuck-penalty firing before the agent had a chance
+        # to move. `time_cost` charges every frame uniformly instead, so there is
+        # nothing to suppress.
         reward = self._frame_reward(info)
-        # Grace period: suppress the repeat-state penalty for the first 200
-        # frames to allow early exploration before the agent gets stuck.
-        if frame < 200 and reward == REWARD_VALUES['repeat_state']:
-            reward = 0.0
-        return reward, False
+        return reward, self.died
 
     def extra_observation(self, frame: Any, size: int = 84) -> Any:
         """Slice the HUD band into columns, each upscaled to its own plane."""
@@ -240,11 +285,12 @@ class ZeldaAdapter(GameAdapter):
             "kills_avg": round(kills_avg, 2),
             "cleared": int(self._cleared),
             "rooms": self.rooms_found,
+            "tiles": self.tiles_found,
         }
 
     def summary_line(self) -> str:
         cleared = " - ROOM CLEARED!" if self._cleared else ""
-        rooms = "" if self.confined else f"  Rooms: {self.rooms_found}"
+        rooms = "" if self.confined else f"  Rooms: {self.rooms_found}  Tiles: {self.tiles_found}"
         return f"Kills: {self.episode_kills}/{self.start_spawned}{rooms}{cleared}"
 
     # ------------------------------------------------------------------
@@ -265,9 +311,11 @@ class ZeldaAdapter(GameAdapter):
         reward = 0.0
         old_info = self.old_info
 
-        # Loaded a dungeon state but Link is in the overworld
-        if self.state in DUNGEON_SAVE_STATES and info['Level'] < 1:
-            reward += REWARD_VALUES['level_state_in_overworld']
+        # Walked out of the dungeon he was loaded into — charge once, on the
+        # transition, not for every frame spent outside.
+        if (self.state in DUNGEON_SAVE_STATES
+                and int(info['Level']) < 1 <= int(old_info['Level'])):
+            reward += REWARD_VALUES['left_dungeon']
 
         reward += calculate_difference(old_info, info, SINGLE_PICKUP_ITEMS) * REWARD_VALUES['item_pickup']
         reward += calculate_difference(old_info, info, MULTI_PICKUP_ITEMS) * REWARD_VALUES['item_pickup']
@@ -287,20 +335,31 @@ class ZeldaAdapter(GameAdapter):
                 self.rooms_found += 1
                 reward += REWARD_VALUES['new_room']
 
-        # Encourage movement around the room
-        pos = (info['Link X'], info['Link Y'])
-        if pos not in self.visited_rooms[info['Room']]:
-            self.visited_rooms[info['Room']][pos] = 1
-            reward += REWARD_VALUES['movement']
-        else:
-            reward += REWARD_VALUES['repeat_state']
+        # Exploration bonus, paid once per tile per episode and scaled by how
+        # familiar that tile is overall. Count-based exploration: novelty decays
+        # as 1/sqrt(N), so the agent is pushed outward instead of re-sweeping
+        # ground it already knows.
+        room = info['Room']
+        tile = (int(info['Link X']) // TILE, int(info['Link Y']) // TILE)
+        if tile not in self.visited_rooms[room]:
+            self.visited_rooms[room][tile] = 1
+            key = (int(room), tile[0], tile[1])
+            count = self._tile_counts.get(key, 0) + 1
+            self._tile_counts[key] = count
+            reward += REWARD_VALUES['movement'] / math.sqrt(count)
+            self.tiles_found += 1
+
+        # Time is never free.
+        reward += REWARD_VALUES['time_cost']
 
         if info['Enemies Killed'] > old_info['Enemies Killed']:
             reward += REWARD_VALUES['kill_enemy']
 
-        # REWARD_VALUES['death'] is already negative — add it
+        # REWARD_VALUES['death'] is already negative — add it. The counter is
+        # the unambiguous death signal; step() also watches DEATH_MODES.
         if info['Deaths'] > old_info['Deaths']:
             reward += REWARD_VALUES['death']
+            self.died = True
 
         self.old_info = info
         return reward

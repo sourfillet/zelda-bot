@@ -133,7 +133,7 @@ class DQNAgent:
         return action
 
     def train(self, state: np.ndarray, action: np.ndarray | int, reward: float,
-              next_state: np.ndarray, done: bool) -> float | None:
+              next_state: np.ndarray, done: bool, learn: bool = True) -> float | None:
         """
         Store the transition in memory and train the model using experience replay.
         This method uses a mini-batch of past transitions and computes targets using the target network.
@@ -147,6 +147,12 @@ class DQNAgent:
 
         # Store transition
         self.memory.append((state, action_index, reward, next_state, done))
+
+        # main.py may store a transition without taking a gradient step, so the
+        # replay buffer still sees every decision while training runs at a lower
+        # frequency. Skipping the store instead would silently discard data.
+        if not learn:
+            return None
 
         # Only start training when enough samples are available
         if len(self.memory) < self.batch_size:
