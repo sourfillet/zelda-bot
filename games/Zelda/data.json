@@ -32,6 +32,10 @@
       "address": 1644,
       "type": "|u1"
     },
+    "Compass": {
+      "address": 1639,
+      "type": "|u1"
+    },
     "Deaths": {
       "address": 1584,
       "type": "|u1"
@@ -130,6 +134,10 @@
     },
     "Magical Rod": {
       "address": 1631,
+      "type": "|u1"
+    },
+    "Map": {
+      "address": 1640,
       "type": "|u1"
     },
     "Potion": {

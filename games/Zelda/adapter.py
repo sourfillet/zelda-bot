@@ -20,15 +20,10 @@ from games.base import GameAdapter
 # Reward constants (kill is the dominant signal)
 # ----------------------------------------------------------------------------
 REWARD_VALUES = {
-    # Charged ONCE when Link walks out of the dungeon he was loaded into, not
-    # per frame. As a per-frame charge it was -0.02 x however long he stayed
-    # out: measured over -100 on a single 10k-frame episode, which buried kills
-    # and room discoveries at +-1. A one-off keeps the signal without letting
-    # episode length set its size.
+    # Charged once, on the transition out, so episode length cannot set its size.
     'left_dungeon': -1.0,
-    # Link left the dungeon he was loaded into: the objective is that dungeon,
-    # so the episode is over. Sized to match `leave_start_room`, which gates the
-    # confined states the same way.
+    # Left the loaded dungeon, which ends the episode. Matches
+    # `leave_start_room`, the equivalent gate for confined states.
     'abandon_dungeon': -5.0,
     # Link leaves the room he started in. Only charged in confined mode, where
     # the point of the episode is to stay and fight (the `monsters` state).
@@ -37,35 +32,23 @@ REWARD_VALUES = {
     # exploration is the objective in a dungeon, not a failure. Sized to match
     # a kill so discovery and combat pull with comparable force.
     'new_room': 1.0,
-    # Coefficient for the exploration bonus. The payout for reaching a tile is
-    # movement / sqrt(N), where N is how many times that tile has ever been
-    # reached this process — so a fresh room pays near full rate and the hub
-    # room's 78th sweep pays about a ninth of its first.
+    # Exploration bonus coefficient: a tile pays movement / sqrt(N), where N is
+    # how often it has been reached this process. Familiar ground stops paying.
     'movement': 0.05,
-    # Charged every frame. Without it, loitering in an exhausted room is free
-    # rather than merely unprofitable, and episodes run to max_frames doing
-    # nothing.
-    #
-    # Bounded by the suicide constraint, not by taste. Ending an episode stops
-    # the clock, so if accumulated time cost can exceed the death penalty then
-    # dying is the cheapest way to stop paying it. Discounting caps the
-    # accumulation at `time_cost * FRAME_SKIP / (1 - discount_factor)`, so the
-    # requirement is that this stays smaller than the death penalty. It was
-    # -0.0003, giving -0.120 against a -0.05 death: dying won by 0.07.
+    # Charged every frame, so loitering in an exhausted room is unprofitable.
+    # Upper bound is a constraint, not a preference: ending an episode stops the
+    # clock, so |time_cost * FRAME_SKIP / (1 - discount_factor)| must stay below
+    # |death| or dying becomes the cheapest way to stop paying it.
     'time_cost': -0.0001,
     # Killing an enemy (PRIMARY goal — kept dominant)
     'kill_enemy': 1.0,
     # Heart changes
     'heart_loss': -0.01,
     'heart_gain': 0.01,
-    # Death. Must outweigh the discounted time cost of playing an episode out,
-    # or death becomes a shortcut — see `time_cost`. Cannot be fixed by making
-    # this arbitrarily large: `reward_clip` caps a single event at +-1.0 while
-    # per-frame costs accumulate uncapped, so -1.0 is the most that survives
-    # clipping and the time cost is the side that has to move.
+    # Must outweigh the discounted time cost of playing an episode out; see
+    # `time_cost`. Capped at 1.0 in practice because `reward_clip` bounds any
+    # single event, so `time_cost` is the side that has to move.
     'death': -1.0,
-    # Item pickup (per item)
-    'item_pickup': 0.01,
 }
 
 # ----------------------------------------------------------------------------
@@ -94,30 +77,16 @@ ACTIONS = [
 # press. Directions stay held (movement is level-triggered).
 ACTIONS_RELEASED = [[0] + a[1:8] + [0] for a in ACTIONS]
 
-# Position is quantized to TILE-square cells before being counted. Rewarding
-# distinct (Link X, Link Y) pixel pairs made sub-pixel jitter look like
-# exploration: a 10k-frame level1 episode logged ~1,658 "discoveries" worth
-# +83, against +5 for clearing a whole room. On an 8px grid a room holds a few
-# hundred cells and a thorough sweep is worth roughly a handful of kills.
+# Position is quantized to TILE-square cells before being counted, so sub-pixel
+# jitter does not read as exploration. A room holds a few hundred cells.
 TILE = 8
 
-# Normal-play frames in the overworld before a dungeon episode ends. 1 = end on
-# the transition itself, which is the analogue of `leave_start_room`.
+# Normal-play frames in the overworld before a dungeon episode ends. 1 ends it
+# on the transition itself, putting the penalty on the decision that caused it;
+# any grace period is long enough to bank an overworld kill first.
 #
-# It has to be immediate, because the overworld is not a distraction from the
-# reward — under random play it is the ONLY source of it. Measured over 8
-# episodes: 0 kills inside the dungeon across 33,584 frames, 8 kills outside
-# across 46,416. Level 1's entrance room is empty and Link starts at the door,
-# so the nearest reward and the only reward are both outside.
-#
-# A grace period is therefore worse than useless: it is exactly long enough to
-# bank an overworld kill before the penalty lands, and at gamma=0.99 a penalty
-# 300 frames (~75 decisions) downstream arrives at ~0.47 strength. Ending on the
-# transition puts it on the causal decision at full value.
-#
-# Safe against false positives because `_frame_reward` only runs on NORMAL_MODE
-# frames — door, stair and scroll animations return earlier in step(), so an
-# in-dungeon transition can never trip this.
+# Cannot misfire on in-dungeon doors or stairs: `_frame_reward` only runs on
+# NORMAL_MODE frames, and transition animations return earlier in step().
 OVERWORLD_PATIENCE = 1
 
 # ----------------------------------------------------------------------------
@@ -128,15 +97,10 @@ OVERWORLD_PATIENCE = 1
 # (a 3x3-px square that moves with the room, drawn even without the Map item),
 # the equipped items, and the key/bomb/rupee counts.
 #
-# Split into columns rather than squeezed into one plane. The HUD is 240x56, so
-# one plane means a 0.35x horizontal scale that leaves the marker *smaller*
-# than it already was. Three 80px columns scale 1.05x horizontally and 1.50x
-# vertically, so nothing shrinks -- measured marker area 1.3x on level1 and
-# 1.7x on gamestart, versus 0.4x for a single stretched plane.
-#
-# Taking the whole band also removes a fragile hand-fitted rectangle: an
-# earlier version cropped a guessed minimap box that turned out to be tuned to
-# level1 and monsters and missed the marker in other states.
+# Columns rather than one stretched plane: the HUD is 240x56, so a single plane
+# scales 0.35x horizontally and leaves the marker smaller than the ordinary
+# downscale does. Three 80px columns scale up on both axes. Taking the whole
+# band also avoids hand-fitting a minimap rectangle per state.
 HUD_HEIGHT = 56          # playfield starts here
 HUD_COLUMNS = 3
 
@@ -150,16 +114,9 @@ NORMAL_MODE = 5
 # `Deaths` counter is checked as well, since it is unambiguous.
 DEATH_MODES = (8, 17)
 
-# Everything else non-normal is a transition animation — doors, stairs, cave
-# entries, the tail of a room scroll. Measured over 6000 uninterrupted frames on
-# level1: mode 3 runs ~87 frames, mode 16 ~64, mode 4 ~62, mode 2 exactly 19,
-# and every spell returns to mode 5. Modes 8 and 17 never appeared.
-#
-# This used to be treated as death and ended the episode, which meant the run
-# was cut short *precisely when the agent reached a door* — 25% of episodes in
-# one level1 run ended under 600 frames while 66% hit the 10k cap. The bug was
-# invisible in the `monsters` room, where the episode ended on scroll before any
-# of these modes could appear.
+# Every other non-normal mode (2, 3, 16) is a transition animation for doors,
+# stairs and cave entries: fixed-length, always returning to mode 5. They score
+# nothing but must not end the episode.
 
 # States where the episode is meant to stay on one screen. `monsters` is the
 # isolated combat room; everything else (a dungeon entrance, the overworld) is
@@ -174,15 +131,64 @@ DUNGEON_SAVE_STATES = {
     "level5", "level6", "level7", "level8",
 }
 
-# Items that can only be obtained once (count never decreases)
-SINGLE_PICKUP_ITEMS = [
-    "Boomerang", "Bow", "Candle", "Flute", "Ladder", "Letter", "Magic Book",
-    "Magical Key", "Magical Rod", "Power Bracelet", "Raft", "Ring", "Shield",
-    "Sword",
-]
+# ----------------------------------------------------------------------------
+# Item pickups
+# ----------------------------------------------------------------------------
+# Everything below pays on a GAIN only, so spending a key or throwing a bomb
+# scores nothing. Values are tiered by what the item actually unlocks.
 
-# Items that can be picked up repeatedly (count may rise or fall)
-MULTI_PICKUP_ITEMS = ["Arrow", "Bombs", "Keys", "Rupees"]
+# Plain counters — reward every unit gained.
+COUNTER_ITEMS = {
+    # Keys gate locked doors, the main barrier to the rest of a dungeon.
+    "Keys": 0.5,
+    "Bombs": 0.1,
+    "Rupees": 0.02,
+}
+
+# One-time acquisitions and upgrades. RAM holds a type or flag (sword 1-3,
+# candle 1-2, ...), so any increase is an acquisition. Sized to match a kill.
+MAJOR_ITEMS = [
+    "Arrow", "Boomerang", "Boomerang 2", "Bow", "Candle", "Flute", "Food",
+    "Ladder", "Letter", "Magic Book", "Magical Key", "Magical Rod", "Potion",
+    "Power Bracelet", "Raft", "Ring", "Shield", "Sword",
+]
+MAJOR_ITEM_REWARD = 1.0
+
+# Temporary powerup, not an acquisition.
+MINOR_ITEMS = {"Clock": 0.2}
+
+# Per-level bitfields, one bit per dungeon. Counted by newly-set bits so a
+# second dungeon's map still scores once the first is held.
+BITFIELD_ITEMS = {
+    # The scenario's actual objective.
+    "Triforce Pieces": 1.0,
+    "Map": 0.3,
+    "Compass": 0.3,
+}
+
+# $066F packs filled hearts in the low nibble and (containers - 1) in the high.
+# Only the high nibble is an acquisition; healing and damage are handled by
+# `heart_gain`/`heart_loss` from the decoded value.
+HEART_CONTAINER_REWARD = 1.0
+
+
+def item_reward(old: dict[str, Any], new: dict[str, Any]) -> float:
+    """Reward for everything Link gained between two frames. Gains only."""
+    total = 0.0
+    for name, value in COUNTER_ITEMS.items():
+        total += max(int(new[name]) - int(old[name]), 0) * value
+    for name in MAJOR_ITEMS:
+        if int(new[name]) > int(old[name]):
+            total += MAJOR_ITEM_REWARD
+    for name, value in MINOR_ITEMS.items():
+        if int(new[name]) > int(old[name]):
+            total += value
+    for name, value in BITFIELD_ITEMS.items():
+        gained_bits = (int(new[name]) & ~int(old[name])) & 0xFF
+        total += bin(gained_bits).count("1") * value
+    containers = (int(new["Heart Containers"]) >> 4) - (int(old["Heart Containers"]) >> 4)
+    total += max(containers, 0) * HEART_CONTAINER_REWARD
+    return total
 
 
 def get_actual_hearts(containers: int = 0, partial: int = 0) -> float:
@@ -197,11 +203,6 @@ def get_actual_hearts(containers: int = 0, partial: int = 0) -> float:
     elif partial > 0:
         filled += 0.5
     return filled
-
-
-def calculate_difference(old: dict[str, Any], new: dict[str, Any], list_of_items: list[str]) -> float:
-    """Sum the absolute change of each named item between two info dicts."""
-    return sum(abs(old[item] - new[item]) for item in list_of_items)
 
 
 class ZeldaAdapter(GameAdapter):
@@ -347,14 +348,18 @@ class ZeldaAdapter(GameAdapter):
         reward = 0.0
         old_info = self.old_info
 
+        # Nothing off-task pays: with a dungeon state loaded, the overworld is
+        # 128 unseen rooms and its own enemies, which outbids the dungeon.
+        on_task = not (self.state in DUNGEON_SAVE_STATES and int(info['Level']) < 1)
+
         # Walked out of the dungeon he was loaded into — charge once, on the
         # transition, not for every frame spent outside.
         if (self.state in DUNGEON_SAVE_STATES
                 and int(info['Level']) < 1 <= int(old_info['Level'])):
             reward += REWARD_VALUES['left_dungeon']
 
-        reward += calculate_difference(old_info, info, SINGLE_PICKUP_ITEMS) * REWARD_VALUES['item_pickup']
-        reward += calculate_difference(old_info, info, MULTI_PICKUP_ITEMS) * REWARD_VALUES['item_pickup']
+        if on_task:
+            reward += item_reward(old_info, info)
 
         info['Hearts'] = get_actual_hearts(info['Heart Containers'], info['Hearts'])
         if info['Hearts'] < old_info['Hearts']:
@@ -362,13 +367,6 @@ class ZeldaAdapter(GameAdapter):
         elif info['Hearts'] > old_info['Hearts']:
             reward += REWARD_VALUES['heart_gain']
 
-        # Exploration is only paid where the objective is. When a dungeon state
-        # is loaded, the overworld is off-task: 128 rooms of never-before-seen
-        # ground, every one of them worth `new_room` plus a full-rate tile sweep.
-        # A one-off exit penalty cannot compete with that — it is paid once and
-        # the reward is unbounded — so the fix is to stop paying rather than to
-        # out-bid our own bonus with a bigger penalty.
-        on_task = not (self.state in DUNGEON_SAVE_STATES and int(info['Level']) < 1)
         self.frames_outside = 0 if on_task else self.frames_outside + 1
 
         if info['Room'] not in self.visited_rooms:

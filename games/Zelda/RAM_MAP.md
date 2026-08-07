@@ -42,6 +42,15 @@ exercised here · 🔬 discovered/confirmed empirically, not on DataCrystal.
 | 1645 | $66D | Rupees | | ✅ |
 | 1646 | $66E | Keys | | ✅ |
 | 1649 | $671 | Triforce Pieces | bitfield, one bit per piece | 📖 |
+| 1639 | $667 | Compass | bitfield, one bit per dungeon | 📖 |
+| 1640 | $668 | Map | bitfield, one bit per dungeon | 📖 |
+
+Compass and Map are used by the item reward but have **never been observed
+changing** here — every save state is a fresh dungeon entry and all ten hold 0,
+and 16k frames of random play on level1 left them constant. That constancy at
+least bounds the risk: a wrong address fails silently rather than paying out
+noise. To verify, collect level 1's map (room 118) and check $668 becomes
+non-zero.
 
 Inventory bytes ($657–$676: Sword, Bombs, Arrow, Bow, Candle, Flute, Food,
 Potion, Magical Rod, Raft, Magic Book, Ring, Ladder, Magical Key, Power
