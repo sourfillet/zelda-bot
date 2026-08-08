@@ -225,6 +225,11 @@ def parse_arguments() -> argparse.Namespace:
     # log of a training run that is already in flight.
     parser.add_argument('--log_file', type=str, default='training_log.csv',
                         help='CSV to append per-episode stats to')
+    parser.add_argument('--run_root', type=str, default=RUNS_ROOT,
+                        help='Directory tree to write this run into (default "runs"). '
+                             'Point smoke tests at a scratch path so their output '
+                             'never lands beside real runs and cannot be caught by '
+                             'a cleanup glob over runs/.')
     args = parser.parse_args()
 
     # Resolve the sentinels, remembering which were set on the CLI.
@@ -538,9 +543,9 @@ def main() -> None:
     total_rewards = 0.0
 
     # Everything this run produces goes in one directory.
-    run_dir = create_run_dir(args.game, args.model, state_name)
+    run_dir = create_run_dir(args.game, args.model, state_name, root=args.run_root)
     run_config = write_run_config(run_dir, args, adapter, action_size, state_name)
-    append_run_index(run_dir, run_config)
+    append_run_index(run_dir, run_config, root=args.run_root)
     # --log_file only overrides when explicitly given; otherwise the log belongs
     # to the run, which is what makes it analysable without splitting on episode
     # counter resets.
