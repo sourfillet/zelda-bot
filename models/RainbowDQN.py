@@ -175,7 +175,8 @@ class RainbowDQNAgent:
 
     def __init__(self, input_shape: tuple[int, int, int], action_size: int,
                  learning_rate: float, discount_factor: float, epsilon: float,
-                 epsilon_decay: float, epsilon_min: float) -> None:
+                 epsilon_decay: float, epsilon_min: float,
+                 q_limit: float | None = None) -> None:
         self.input_shape = input_shape  # (height, width, stacked_frames), e.g. (84, 84, 4)
         self.action_size = action_size
         self.learning_rate = learning_rate
@@ -183,6 +184,12 @@ class RainbowDQNAgent:
         self.epsilon = epsilon
         self.epsilon_decay = epsilon_decay
         self.epsilon_min = epsilon_min
+        # Hard ceiling on the Bellman target; see DQNAgent. Reward clipping
+        # bounds the reward term of the target but not the bootstrap term, so
+        # an inflated target_model output trains the main net toward an even
+        # larger one with no loss signal — TD error stays small while both sides
+        # inflate together.
+        self.q_limit = q_limit
 
         # Prioritized replay buffer
         self.memory = PrioritizedReplayBuffer(capacity=20000)
@@ -458,6 +465,8 @@ class RainbowDQNAgent:
             else:
                 best_action = int(np.argmax(main_q_next[i]))
                 target_val = rewards[i] + gamma_n[i] * target_q_next[i][best_action]
+            if self.q_limit is not None:
+                target_val = min(max(target_val, -self.q_limit), self.q_limit)
             td_errors[i] = abs(target_val - current_q[i][actions[i]])
             targets[i][actions[i]] = target_val
 

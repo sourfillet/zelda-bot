@@ -13,7 +13,8 @@ from tensorflow.keras.optimizers import Adam
 class DQNAgent:
     def __init__(self, input_shape: tuple[int, int, int], action_size: int,
                  learning_rate: float, discount_factor: float, epsilon: float,
-                 epsilon_decay: float, epsilon_min: float) -> None:
+                 epsilon_decay: float, epsilon_min: float,
+                 q_limit: float | None = None) -> None:
         self.input_shape = input_shape  # (height, width, stacked_frames), e.g. (84, 84, 4)
         self.action_size = action_size
         self.learning_rate = learning_rate
@@ -21,6 +22,13 @@ class DQNAgent:
         self.epsilon = epsilon
         self.epsilon_decay = epsilon_decay
         self.epsilon_min = epsilon_min
+        # Hard ceiling on the Bellman target. With rewards clipped to +-c the
+        # true optimal Q cannot exceed c / (1 - gamma), so clamping to it never
+        # discards a legitimate value — but it does break the feedback loop
+        # where an inflated bootstrap trains the net toward an even larger one.
+        # Reward clipping alone does not prevent this: it bounds the reward term
+        # of the target, not the bootstrap term, which is the net's own output.
+        self.q_limit = q_limit
 
         # Experience Replay parameters
         self.memory: deque = deque(maxlen=20000)
@@ -178,10 +186,11 @@ class DQNAgent:
 
         # Update the Q-value for the taken action
         for i in range(self.batch_size):
-            if dones[i]:
-                target[i][actions[i]] = rewards[i]
-            else:
-                target[i][actions[i]] = rewards[i] + self.discount_factor * bootstrap[i]
+            target_val = (rewards[i] if dones[i]
+                          else rewards[i] + self.discount_factor * bootstrap[i])
+            if self.q_limit is not None:
+                target_val = min(max(target_val, -self.q_limit), self.q_limit)
+            target[i][actions[i]] = target_val
 
         # One compiled gradient step on the updated target values
         loss = self._train_step(tf.convert_to_tensor(states),

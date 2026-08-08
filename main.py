@@ -427,6 +427,10 @@ def save_model(agent: DQNAgent | RainbowDQNAgent, episode: int, run_dir: str,
 
 # Game-agnostic log columns. The chosen game adapter contributes extra columns
 # (adapter.log_fields) inserted before 'timestamp'.
+# |Q| above this multiple of q_limit means the network has run away rather than
+# merely overshot. The clamp keeps legitimate values at or under q_limit.
+DIVERGENCE_FACTOR = 5.0
+
 BASE_LOG_COLUMNS = ['episode', 'episode_reward', 'moving_avg', 'avg_loss', 'max_q', 'epsilon',
                     'frames', 'training_steps', 'replay_buffer_size']
 
@@ -551,15 +555,25 @@ def main() -> None:
     if args.input_size != DEFAULT_INPUT_SIZE or adapter.extra_planes:
         print(f"Input shape: {shape}  ({STACK_FRAMES} stacked frames "
               f"+ {adapter.extra_planes} adapter plane(s))")
+    # With rewards clipped to +-c, no true Q-value can exceed c / (1 - gamma).
+    # Handing that to the agent lets it clamp the Bellman target to it, which is
+    # what actually stops runaway bootstrapping. 0 (clipping off) leaves the
+    # target unbounded.
+    q_limit = args.reward_clip / (1.0 - args.discount_factor) if args.reward_clip > 0 else None
+    if q_limit is not None:
+        print(f"Q-value limit: +-{q_limit:.1f} (reward_clip {args.reward_clip} / (1 - {args.discount_factor}))")
     if args.model == 'DQN':
         agent = DQNAgent(shape, action_size, args.learning_rate,
-                         args.discount_factor, args.epsilon, args.epsilon_decay, args.epsilon_min)
+                         args.discount_factor, args.epsilon, args.epsilon_decay, args.epsilon_min,
+                         q_limit=q_limit)
     elif args.model == 'DoubleDQN':
         agent = DoubleDQNAgent(shape, action_size, args.learning_rate,
-                               args.discount_factor, args.epsilon, args.epsilon_decay, args.epsilon_min)
+                               args.discount_factor, args.epsilon, args.epsilon_decay, args.epsilon_min,
+                               q_limit=q_limit)
     elif args.model == 'RainbowDQN':
         agent = RainbowDQNAgent(shape, action_size, args.learning_rate,
-                                args.discount_factor, args.epsilon, args.epsilon_decay, args.epsilon_min)
+                                args.discount_factor, args.epsilon, args.epsilon_decay, args.epsilon_min,
+                                q_limit=q_limit)
     else:
         raise SystemExit(f"Unknown model {args.model!r}. Choose DQN, DoubleDQN, or RainbowDQN.")
 
@@ -738,6 +752,17 @@ def main() -> None:
             print(summary)
         print(f"Avg Loss: {avg_loss:.4f}")
         print(f"Max |Q|: {max_abs_q:.4g}")
+        # Divergence canary. With the target clamped, |Q| should sit well inside
+        # q_limit; drifting past it means the network is running away and every
+        # further episode is wasted compute. One run reached |Q| = 2.8e19 and
+        # spent its last 300 episodes there, scoring -6.00 every time.
+        if q_limit is not None and max_abs_q > q_limit * DIVERGENCE_FACTOR:
+            print(f"\n*** DIVERGED: |Q| = {max_abs_q:.4g} exceeds {DIVERGENCE_FACTOR}x the "
+                  f"q_limit of {q_limit:.1f}. Training is not recoverable from here.")
+            print(f"*** Best checkpoint kept at {run_dir}/checkpoints/best.keras "
+                  f"(reward {best_reward:+.2f}).")
+            print("*** Stopping. Lower --learning_rate or --reward_clip and resume from best.keras.")
+            break
         print(f"Epsilon: {agent.epsilon:.4f}")
         print(f"Frames: {frame_count}")
         print(f"Training Steps: {training_steps}")
