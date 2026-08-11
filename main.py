@@ -20,6 +20,7 @@ from games.base import GameAdapter
 from models.DoubleDQN import DoubleDQNAgent
 from models.DQN import DQNAgent
 from models.RainbowDQN import RainbowDQNAgent
+from models.RND import RNDNovelty
 
 # Debug mode disabled for performance - uncomment only when debugging specific issues
 # tf.config.run_functions_eagerly(True)
@@ -225,6 +226,22 @@ def parse_arguments() -> argparse.Namespace:
     # log of a training run that is already in flight.
     parser.add_argument('--log_file', type=str, default='training_log.csv',
                         help='CSV to append per-episode stats to')
+    parser.add_argument('--rnd_beta', type=float, default=0.0,
+                        help='Weight on the RND novelty bonus added to the training '
+                             'reward. 0 (default) disables RND entirely.')
+    parser.add_argument('--rnd_lr', type=float, default=0.0001,
+                        help='Adam learning rate for the RND predictor')
+    parser.add_argument('--rnd_planes', type=str, default='all',
+                        choices=['all', 'extra'],
+                        help="Which observation channels feed RND. 'all' (default) uses "
+                             "the full frame stack. 'extra' uses only the adapter's extra "
+                             "planes, which sounds appealing for Zelda (the HUD minimap "
+                             "identifies the room and carries no enemy motion) but "
+                             "measures badly: the HUD is nearly constant *within* a room, "
+                             "so RND sees ~one state per room, fits it immediately and "
+                             "then pays nothing. Measured over 8 episodes, per-decision "
+                             "bonus decayed 976x on 'extra' against 62x on 'all', leaving "
+                             "the late bonus 37x larger on 'all'.")
     parser.add_argument('--run_root', type=str, default=RUNS_ROOT,
                         help='Directory tree to write this run into (default "runs"). '
                              'Point smoke tests at a scratch path so their output '
@@ -436,7 +453,7 @@ def save_model(agent: DQNAgent | RainbowDQNAgent, episode: int, run_dir: str,
 # merely overshot. The clamp keeps legitimate values at or under q_limit.
 DIVERGENCE_FACTOR = 5.0
 
-BASE_LOG_COLUMNS = ['episode', 'episode_reward', 'moving_avg', 'avg_loss', 'max_q', 'epsilon',
+BASE_LOG_COLUMNS = ['episode', 'episode_reward', 'intrinsic_reward', 'moving_avg', 'avg_loss', 'max_q', 'epsilon',
                     'frames', 'training_steps', 'replay_buffer_size']
 
 def log_episode_stats(columns: list[str], values: dict[str, Any],
@@ -585,6 +602,21 @@ def main() -> None:
     # batch_size is a plain attribute on every agent, so this needs no
     # constructor plumbing.
     agent.batch_size = args.batch_size
+
+    # Intrinsic novelty. Off unless --rnd_beta is set, so every existing
+    # invocation behaves exactly as before.
+    rnd: RNDNovelty | None = None
+    if args.rnd_beta > 0:
+        use_extra = args.rnd_planes == 'extra' and adapter.extra_planes > 0
+        planes = (tuple(range(STACK_FRAMES, STACK_FRAMES + adapter.extra_planes))
+                  if use_extra else None)
+        rnd_shape = (args.input_size, args.input_size,
+                     adapter.extra_planes if use_extra else shape[2])
+        rnd = RNDNovelty(rnd_shape, learning_rate=args.rnd_lr, planes=planes)
+        which = (f"adapter planes {planes}" if use_extra else "the full frame stack")
+        print(f"RND novelty: beta={args.rnd_beta} over {which}, shape {rnd_shape}")
+        if args.rnd_planes == 'extra' and not use_extra:
+            print("  (adapter defines no extra planes; fell back to the full stack)")
     if args.batch_size != 32 or args.train_every != 1:
         print(f"Replay: batch {args.batch_size}, gradient step every "
               f"{args.train_every} decision(s)")
@@ -641,6 +673,7 @@ def main() -> None:
         episode_loss = 0.0  # Track total loss for this episode
         training_steps = 0  # Count training steps in this episode
 
+        episode_intrinsic = 0.0
         while not done and frame_count < args.max_frames:
             action = agent.act(state)
             action_index = int(np.argmax(action))
@@ -714,7 +747,19 @@ def main() -> None:
             # Every decision transition is stored; --train_every controls how
             # often one of them triggers a gradient step.
             decisions += 1
-            loss = agent.train(state, action, clip_reward(reward, args.reward_clip),
+
+            # Intrinsic novelty is added to what the agent TRAINS on, never to
+            # `episode_reward` — the logged return stays purely extrinsic so it
+            # remains comparable against runs without RND and against the
+            # adapter's reward table. Same principle as reward clipping.
+            train_reward = reward
+            if rnd is not None:
+                bonus = args.rnd_beta * rnd.bonus(next_state)
+                episode_intrinsic += bonus
+                train_reward += bonus
+                rnd.observe(next_state)
+
+            loss = agent.train(state, action, clip_reward(train_reward, args.reward_clip),
                                next_state, done,
                                learn=(decisions % args.train_every == 0))
             if loss is not None:
@@ -756,6 +801,8 @@ def main() -> None:
         if summary:
             print(summary)
         print(f"Avg Loss: {avg_loss:.4f}")
+        if rnd is not None:
+            print(f"Intrinsic: {episode_intrinsic:+.3f} (extrinsic {episode_reward:+.2f})")
         print(f"Max |Q|: {max_abs_q:.4g}")
         # Divergence canary. With the target clamped, |Q| should sit well inside
         # q_limit; drifting past it means the network is running away and every
@@ -780,6 +827,7 @@ def main() -> None:
             'episode_reward': f"{episode_reward:.2f}",
             'moving_avg': f"{moving_avg:.2f}",
             'avg_loss': f"{avg_loss:.4f}",
+            'intrinsic_reward': f"{episode_intrinsic:.4f}",
             'max_q': f"{max_abs_q:.4g}",
             'epsilon': f"{agent.epsilon:.4f}",
             'frames': frame_count,
