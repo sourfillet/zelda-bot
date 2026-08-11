@@ -228,7 +228,13 @@ def parse_arguments() -> argparse.Namespace:
                         help='CSV to append per-episode stats to')
     parser.add_argument('--rnd_beta', type=float, default=0.0,
                         help='Weight on the RND novelty bonus added to the training '
-                             'reward. 0 (default) disables RND entirely.')
+                             'reward. 0 (default) disables RND entirely. The bonus is '
+                             'normalized by its own running std, so it is ~1.0 PER '
+                             'DECISION by construction and beta sets the per-decision '
+                             'intrinsic reward directly. Size it as (intrinsic wanted '
+                             'per episode) / (max_frames / FRAME_SKIP): ~0.002 puts it '
+                             'on par with a few kills. 0.5 is ~500 per episode, which '
+                             'saturates reward_clip on nearly every decision.')
     parser.add_argument('--rnd_lr', type=float, default=0.0001,
                         help='Adam learning rate for the RND predictor')
     parser.add_argument('--rnd_planes', type=str, default='all',
@@ -452,6 +458,12 @@ def save_model(agent: DQNAgent | RainbowDQNAgent, episode: int, run_dir: str,
 # |Q| above this multiple of q_limit means the network has run away rather than
 # merely overshot. The clamp keeps legitimate values at or under q_limit.
 DIVERGENCE_FACTOR = 5.0
+
+# Warn when an episode's intrinsic reward exceeds this multiple of its extrinsic
+# reward. Intrinsic is stored into the replay buffer at the value it had when the
+# transition happened, so an oversized beta leaves the buffer full of inflated
+# rewards that outlive the novelty that justified them.
+INTRINSIC_WARN_RATIO = 20.0
 
 BASE_LOG_COLUMNS = ['episode', 'episode_reward', 'intrinsic_reward', 'moving_avg', 'avg_loss', 'max_q', 'epsilon',
                     'frames', 'training_steps', 'replay_buffer_size']
@@ -754,9 +766,25 @@ def main() -> None:
             # adapter's reward table. Same principle as reward clipping.
             train_reward = reward
             if rnd is not None:
-                bonus = args.rnd_beta * rnd.bonus(next_state)
-                episode_intrinsic += bonus
-                train_reward += bonus
+                # No novelty on a terminal transition. Two reasons, and the
+                # second is the one that bites:
+                #
+                # 1. Novelty is a signal to explore *onward*. From a terminal
+                #    state there is no onward, so paying it rewards reaching a
+                #    dead end.
+                # 2. A state that ends the episode is visited about once per
+                #    episode, so the predictor never fits it and its bonus never
+                #    decays — an inexhaustible reward source. In Zelda the
+                #    overworld frame just past the dungeon door is exactly this,
+                #    and since the training reward is clip(-6.0 + beta*bonus),
+                #    a bonus over 5.0/beta flips the exit from -1.0 to +1.0 and
+                #    makes leaving the best action in the game.
+                #
+                # Still observed, so the states do decay if reached legitimately.
+                if not done:
+                    bonus = args.rnd_beta * rnd.bonus(next_state)
+                    episode_intrinsic += bonus
+                    train_reward += bonus
                 rnd.observe(next_state)
 
             loss = agent.train(state, action, clip_reward(train_reward, args.reward_clip),
@@ -803,6 +831,19 @@ def main() -> None:
         print(f"Avg Loss: {avg_loss:.4f}")
         if rnd is not None:
             print(f"Intrinsic: {episode_intrinsic:+.3f} (extrinsic {episode_reward:+.2f})")
+            # Intrinsic reward is baked into the replay buffer at storage time,
+            # so an oversized beta poisons transitions that keep being sampled
+            # long after novelty itself has decayed away. Catch it on episode 0
+            # rather than 70 episodes later.
+            ratio = abs(episode_intrinsic) / max(abs(episode_reward), 1e-9)
+            if ratio > INTRINSIC_WARN_RATIO:
+                per_dec = episode_intrinsic / max(decisions, 1)
+                suggested = args.rnd_beta * (2.0 / max(ratio, 1e-9))
+                print(f"  *** WARNING: intrinsic is {ratio:.0f}x extrinsic "
+                      f"({per_dec:+.3f}/decision). --rnd_beta {args.rnd_beta} is likely "
+                      f"far too large; try ~{suggested:.4f}.")
+                print("  *** Stored rewards keep the old bonus after novelty decays, "
+                      "so this does not correct itself.")
         print(f"Max |Q|: {max_abs_q:.4g}")
         # Divergence canary. With the target clamped, |Q| should sit well inside
         # q_limit; drifting past it means the network is running away and every
