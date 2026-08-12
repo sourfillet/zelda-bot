@@ -145,6 +145,17 @@ COUNTER_ITEMS = {
     "Rupees": 0.02,
 }
 
+# Items whose *decrease* is progress rather than loss. Keys are consumed only by
+# locked doors — verified: 5 keys survived 8000 frames of random play across
+# deaths and room transitions with zero change, then holding UP into level 1's
+# locked door consumed exactly one. Nothing else in the game takes them.
+#
+# Worth its own reward because the unlock is 62 frames upstream of the room
+# transition it earns, and pays nothing on its own: measured, keys drop at frame
+# 84 in Room 115 during normal play while the room only changes at frame 146.
+# This puts the reward on the decision that actually opened the door.
+SPEND_ITEMS = {"Keys": 0.5}
+
 # One-time acquisitions and upgrades. RAM holds a type or flag (sword 1-3,
 # candle 1-2, ...), so any increase is an acquisition. Sized to match a kill.
 MAJOR_ITEMS = [
@@ -177,6 +188,8 @@ def item_reward(old: dict[str, Any], new: dict[str, Any]) -> float:
     total = 0.0
     for name, value in COUNTER_ITEMS.items():
         total += max(int(new[name]) - int(old[name]), 0) * value
+    for name, value in SPEND_ITEMS.items():
+        total += max(int(old[name]) - int(new[name]), 0) * value
     for name in MAJOR_ITEMS:
         if int(new[name]) > int(old[name]):
             total += MAJOR_ITEM_REWARD
