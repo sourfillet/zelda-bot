@@ -237,6 +237,13 @@ def parse_arguments() -> argparse.Namespace:
                              'saturates reward_clip on nearly every decision.')
     parser.add_argument('--rnd_lr', type=float, default=0.0001,
                         help='Adam learning rate for the RND predictor')
+    parser.add_argument('--rnd_train_interval', type=int, default=4,
+                        help='Fit the RND predictor once every N decisions (default 4). '
+                             'Each fit is a 32-sample batch, so the predictor sees '
+                             '32/N samples per decision — at the default that is 8, '
+                             'which fits the reachable state space within a few episodes '
+                             'and leaves novelty dead thereafter. Raise it to keep the '
+                             'bonus alive over hundreds of episodes.')
     parser.add_argument('--rnd_planes', type=str, default='all',
                         choices=['all', 'extra'],
                         help="Which observation channels feed RND. 'all' (default) uses "
@@ -624,9 +631,11 @@ def main() -> None:
                   if use_extra else None)
         rnd_shape = (args.input_size, args.input_size,
                      adapter.extra_planes if use_extra else shape[2])
-        rnd = RNDNovelty(rnd_shape, learning_rate=args.rnd_lr, planes=planes)
+        rnd = RNDNovelty(rnd_shape, learning_rate=args.rnd_lr, planes=planes,
+                         train_interval=args.rnd_train_interval)
         which = (f"adapter planes {planes}" if use_extra else "the full frame stack")
-        print(f"RND novelty: beta={args.rnd_beta} over {which}, shape {rnd_shape}")
+        print(f"RND novelty: beta={args.rnd_beta} over {which}, shape {rnd_shape}, "
+              f"predictor fit every {args.rnd_train_interval} decisions")
         if args.rnd_planes == 'extra' and not use_extra:
             print("  (adapter defines no extra planes; fell back to the full stack)")
     if args.batch_size != 32 or args.train_every != 1:

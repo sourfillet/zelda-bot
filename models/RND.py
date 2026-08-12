@@ -47,13 +47,37 @@ EMBED_DIM = 64
 OBS_CLIP = 5.0
 
 
-class RunningNorm:
-    """Streaming mean/variance (Welford), for observations and for the bonus."""
+# Cap on RunningNorm's effective sample count. Without it `count` grows without
+# bound, each new sample moves the estimate by batch/total -> 0, and the
+# normalizer freezes at whatever scale it first saw. That matters here because
+# RND's raw error falls by orders of magnitude as the predictor learns: on a
+# measured 430-episode run the per-decision raw bonus fell 1.15 -> 0.08 while
+# the normalizer was supposed to be holding it near 1.0, so `beta` quietly lost
+# most of its effect exactly when exploration was needed.
+#
+# ~10k samples is about 8 episodes at 1250 decisions each. Convergence after a
+# scale change still takes several horizons, because the variance carries the
+# old mean until the mean catches up — measured, a 100x drop was still 133x
+# over-estimated four horizons later. So this bounds the lag rather than
+# removing it, and the value is a judgement call that has NOT been validated
+# end-to-end on a full run.
+NORM_MAX_COUNT = 10_000
 
-    def __init__(self, shape: tuple[int, ...] | None = None) -> None:
+
+class RunningNorm:
+    """Streaming mean/variance (Welford) with a bounded horizon.
+
+    Bounded rather than cumulative: this normalizes a quantity whose scale
+    changes by orders of magnitude over a run, and a cumulative estimate stops
+    responding once `count` is large.
+    """
+
+    def __init__(self, shape: tuple[int, ...] | None = None,
+                 max_count: float = NORM_MAX_COUNT) -> None:
         self.mean = np.zeros(shape, dtype=np.float64) if shape else 0.0
         self.var = np.ones(shape, dtype=np.float64) if shape else 1.0
         self.count = 1e-4
+        self.max_count = max_count
 
     def update(self, x: np.ndarray) -> None:
         batch_mean = x.mean(axis=0)
@@ -65,7 +89,8 @@ class RunningNorm:
         m_a = self.var * self.count
         m_b = batch_var * batch_count
         self.var = (m_a + m_b + delta**2 * self.count * batch_count / total) / total
-        self.count = total
+        # Cap the horizon so the estimate keeps tracking the recent scale.
+        self.count = min(total, self.max_count)
 
     @property
     def std(self) -> Any:
