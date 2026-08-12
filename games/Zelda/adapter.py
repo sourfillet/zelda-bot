@@ -286,6 +286,14 @@ class ZeldaAdapter(GameAdapter):
         self.episode_kills = (info["Enemies Killed"] - self.start_kills) % 256
 
         mode = info["Game Mode"]
+
+        # Time is charged on EVERY frame, including transition animations.
+        # Otherwise a door cycle is ~141 frames (35% of one measured crossing)
+        # on which nothing at all is scored — no reward, no penalty, no clock —
+        # which makes shuttling through a doorway strictly better than playing
+        # a room that has stopped paying. It was the one place the clock stopped.
+        reward = REWARD_VALUES['time_cost']
+
         if mode in SCROLL_MODES:
             # Mid-scroll between rooms. Confined episodes end here, so the
             # penalty lands close in time to the action that caused it. While
@@ -293,22 +301,23 @@ class ZeldaAdapter(GameAdapter):
             # the room itself is scored on arrival in _frame_reward.
             if self.confined and self.old_info is not None:
                 return REWARD_VALUES['leave_start_room'], True
-            return 0.0, False
+            return reward, False
         if mode in DEATH_MODES:
             # Real death: penalize and end rather than fill the replay buffer
             # with game-over frames.
             return REWARD_VALUES['death'], True
         if mode != NORMAL_MODE:
             # A transition animation. Link is not controllable and nothing here
-            # is worth scoring, but it is not the end of the episode either.
-            return 0.0, False
+            # is worth scoring, but the clock still runs and the episode goes on.
+            return reward, False
 
         # The old 200-frame grace period is gone with `repeat_state`: it existed
         # to stop a per-frame stuck-penalty firing before the agent had a chance
         # to move. `time_cost` charges every frame uniformly instead, so there is
         # nothing to suppress.
-        reward = self._frame_reward(info)
-        return reward, self.died or self.abandoned
+        # _frame_reward charges its own time_cost for normal-play frames, so
+        # `reward` is not carried in here — that would double-charge.
+        return self._frame_reward(info), self.died or self.abandoned
 
     def extra_observation(self, frame: Any, size: int = 84) -> Any:
         """Slice the HUD band into columns, each upscaled to its own plane."""
