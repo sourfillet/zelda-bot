@@ -125,6 +125,7 @@ class RNDNovelty:
         self.obs_norm = RunningNorm(input_shape)
         self.reward_norm = RunningNorm()
         self._train_step = self._build_train_step()
+        self._bonus_step = self._build_bonus_step()
         self.train_batch = train_batch
         self.train_interval = train_interval
         self._buffer: deque = deque(maxlen=2000)
@@ -157,6 +158,20 @@ class RNDNovelty:
             return loss
         return step
 
+    def _build_bonus_step(self) -> Any:
+        """Compiled forward pass for both nets.
+
+        Uncompiled, the two eager Keras calls cost ~12 ms per decision against
+        0.21 ms for the compiled gradient step doing comparable work — pure
+        dispatch overhead, and it made RND 68% of a decision's wall clock.
+        """
+        @tf.function(reduce_retracing=True)
+        def step(obs: Any) -> Any:
+            target = self.target(obs, training=False)
+            pred = self.predictor(obs, training=False)
+            return tf.reduce_mean(tf.square(pred - target))
+        return step
+
     def _select(self, states: np.ndarray) -> np.ndarray:
         """Take the configured channel slice and drop any leading batch axis."""
         if states.ndim == 3:
@@ -166,7 +181,12 @@ class RNDNovelty:
         return states.astype(np.float32)
 
     def _normalize(self, obs: np.ndarray) -> np.ndarray:
-        norm = (obs - self.obs_norm.mean) / self.obs_norm.std
+        # float32 throughout: the running accumulators stay float64 for
+        # stability, but doing the per-frame arithmetic in float64 costs real
+        # time when observe() runs it over a 32-sample batch (1.6M elements).
+        mean = np.asarray(self.obs_norm.mean, dtype=np.float32)
+        std = np.asarray(self.obs_norm.std, dtype=np.float32)
+        norm = (obs - mean) / std
         return np.clip(norm, -OBS_CLIP, OBS_CLIP).astype(np.float32)
 
     def bonus(self, state: np.ndarray, update_stats: bool = True) -> float:
@@ -180,9 +200,7 @@ class RNDNovelty:
         if update_stats:
             self.obs_norm.update(obs)
         obs = self._normalize(obs)
-        target = self.target(obs, training=False).numpy()
-        pred = self.predictor(obs, training=False).numpy()
-        raw = float(np.mean(np.square(pred - target)))
+        raw = float(self._bonus_step(tf.convert_to_tensor(obs)).numpy())
         if update_stats:
             self.reward_norm.update(np.array([raw]))
         return float(raw / self.reward_norm.std)
