@@ -226,6 +226,18 @@ def parse_arguments() -> argparse.Namespace:
     # log of a training run that is already in flight.
     parser.add_argument('--log_file', type=str, default='training_log.csv',
                         help='CSV to append per-episode stats to')
+    parser.add_argument('--n_steps', type=int, default=3,
+                        help='RainbowDQN n-step return length (default 3). Raising it '
+                             'widens the gap between actions in the Bellman target, '
+                             'which is the measured weak spot: the network discriminates '
+                             'positions 13-16x more strongly than actions, so the argmax '
+                             'rides on ~0.02 of advantage. Ignored by DQN/DoubleDQN.')
+    parser.add_argument('--frame_skip', type=int, default=FRAME_SKIP,
+                        help=f'Emulated frames per decision (default {FRAME_SKIP}). Larger '
+                             'means each action commits to more game time, which also '
+                             'widens the advantage between actions. Edge-triggered '
+                             'buttons are released for the back half of the window '
+                             'regardless of size.')
     parser.add_argument('--rnd_beta', type=float, default=0.0,
                         help='Weight on the RND novelty bonus added to the training '
                              'reward. 0 (default) disables RND entirely. The bonus is '
@@ -332,7 +344,7 @@ def write_run_config(run_dir: str, args: argparse.Namespace, adapter: GameAdapte
         "action_size": action_size,
         "input_shape": list(input_shape(adapter, args.input_size)),
         "extra_planes": adapter.extra_planes,
-        "frame_skip": FRAME_SKIP,
+        "frame_skip": args.frame_skip,
         "args": dict(vars(args)),
     }
     rewards = getattr(sys.modules[adapter.__module__], "REWARD_VALUES", None)
@@ -601,6 +613,8 @@ def main() -> None:
     # what actually stops runaway bootstrapping. 0 (clipping off) leaves the
     # target unbounded.
     q_limit = args.reward_clip / (1.0 - args.discount_factor) if args.reward_clip > 0 else None
+    if args.frame_skip != FRAME_SKIP:
+        print(f"Frame skip: {args.frame_skip} (default {FRAME_SKIP})")
     if q_limit is not None:
         print(f"Q-value limit: +-{q_limit:.1f} (reward_clip {args.reward_clip} / (1 - {args.discount_factor}))")
     if args.model == 'DQN':
@@ -614,7 +628,7 @@ def main() -> None:
     elif args.model == 'RainbowDQN':
         agent = RainbowDQNAgent(shape, action_size, args.learning_rate,
                                 args.discount_factor, args.epsilon, args.epsilon_decay, args.epsilon_min,
-                                q_limit=q_limit)
+                                q_limit=q_limit, n_step=args.n_steps)
     else:
         raise SystemExit(f"Unknown model {args.model!r}. Choose DQN, DoubleDQN, or RainbowDQN.")
 
@@ -706,9 +720,9 @@ def main() -> None:
             # Edge-triggered buttons are released for the back half of the window
             # via the adapter's actions_released variant.
             actions_released = adapter.actions_released or adapter.actions
-            for i in range(FRAME_SKIP):
+            for i in range(args.frame_skip):
                 frame_count += 1
-                buttons = (adapter.actions if i < FRAME_SKIP // 2 else actions_released)[action_index]
+                buttons = (adapter.actions if i < args.frame_skip // 2 else actions_released)[action_index]
                 obs, _, terminated, truncated, info = env.step(buttons)
                 done = terminated or truncated
 
@@ -757,7 +771,7 @@ def main() -> None:
             next_state = get_stacked_state(frame_stack,
                                            adapter.extra_observation(raw, args.input_size))
 
-            if args.debug_frames and frame_count % args.debug_frames < FRAME_SKIP:
+            if args.debug_frames and frame_count % args.debug_frames < args.frame_skip:
                 save_debug_frame(raw, next_state, run_dir, episode, frame_count)
 
             # The agent trains on the *clipped* reward. Huber loss, clipnorm and

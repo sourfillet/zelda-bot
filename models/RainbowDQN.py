@@ -176,7 +176,7 @@ class RainbowDQNAgent:
     def __init__(self, input_shape: tuple[int, int, int], action_size: int,
                  learning_rate: float, discount_factor: float, epsilon: float,
                  epsilon_decay: float, epsilon_min: float,
-                 q_limit: float | None = None) -> None:
+                 q_limit: float | None = None, n_step: int = 3) -> None:
         self.input_shape = input_shape  # (height, width, stacked_frames), e.g. (84, 84, 4)
         self.action_size = action_size
         self.learning_rate = learning_rate
@@ -197,7 +197,7 @@ class RainbowDQNAgent:
         self.train_start = 1000
 
         # n-step return accumulator (one deque per episode; cleared on done)
-        self.n_step = 3
+        self.n_step = n_step
         self.n_step_buffer: deque = deque()
 
         # Soft target update coefficient (Polyak)
