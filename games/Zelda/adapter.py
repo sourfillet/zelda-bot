@@ -230,7 +230,8 @@ class ZeldaAdapter(GameAdapter):
     default_state = "monsters"
     actions = ACTIONS
     actions_released = ACTIONS_RELEASED
-    log_fields = ["kills", "kills_avg", "cleared", "rooms", "tiles", "keys_max", "keys_used"]
+    log_fields = ["kills", "kills_avg", "cleared", "rooms", "tiles", "keys_max",
+                  "keys_used", "key_backtrack"]
     # One plane per HUD column. Set to 0 to train on the playfield alone --
     # changing this changes the network's input shape, so checkpoints do not
     # load across the switch.
@@ -245,11 +246,11 @@ class ZeldaAdapter(GameAdapter):
         self.confined = self.state in CONFINED_STATES
         # Moving-average history of kills across episodes.
         self._kill_history: list[int] = []
-        # Lifetime visit counts, keyed (room, tile_x, tile_y, keys). Deliberately NOT
+        # Lifetime visit counts, keyed (room, tile_x, tile_y). Deliberately NOT
         # cleared in reset(): the whole point is that the bonus decays across
         # episodes, so re-walking the starting room stops paying. Lives for the
         # process, not across separate runs.
-        self._tile_counts: dict[tuple[int, int, int, int], int] = {}
+        self._tile_counts: dict[tuple[int, int, int], int] = {}
         self._cleared = False
         self.reset()
 
@@ -272,6 +273,11 @@ class ZeldaAdapter(GameAdapter):
         # Most keys held at once this episode, and how many were spent on doors.
         self.keys_max = 0
         self.keys_used = 0
+        # Frames spent back in the starting room while carrying a key. Separates
+        # "never backtracks" from "backtracks but never finds the locked door",
+        # which `rooms` cannot distinguish (returning to a visited room does not
+        # increment it).
+        self.key_backtrack = 0
         # Consecutive frames spent in the overworld; see OVERWORLD_PATIENCE.
         self.frames_outside = 0
         # Lifetime kill counter ($52A) survives death/room transitions, so we
@@ -350,6 +356,7 @@ class ZeldaAdapter(GameAdapter):
             "tiles": self.tiles_found,
             "keys_max": self.keys_max,
             "keys_used": self.keys_used,
+            "key_backtrack": self.key_backtrack,
         }
 
     def summary_line(self) -> str:
@@ -388,6 +395,8 @@ class ZeldaAdapter(GameAdapter):
         if on_task:
             reward += item_reward(old_info, info)
         self.keys_max = max(self.keys_max, int(info['Keys']))
+        if int(info['Keys']) > 0 and int(info['Room']) == self.start_room:
+            self.key_backtrack += 1
         self.keys_used += max(int(old_info['Keys']) - int(info['Keys']), 0)
 
         info['Hearts'] = get_actual_hearts(info['Heart Containers'], info['Hearts'])
@@ -429,7 +438,15 @@ class ZeldaAdapter(GameAdapter):
         if tile not in self.visited_rooms[room]:
             self.visited_rooms[room][tile] = 1
             if on_task:
-                key = (int(room), tile[0], tile[1], keys)
+                # The per-episode cell above includes `keys`, so a key pickup
+                # makes known ground payable again. The LIFETIME counter
+                # deliberately does not: a re-sweep should pay at the decayed
+                # rate, not full. Keyed on inventory here too, re-sweeping the
+                # entrance at keys=1 paid ~+2.5 against +1.5 for actually
+                # spending the key (key_used 0.5 + new_room 1.0) — and the agent
+                # collected a key in 40% of episodes while spending one in
+                # 0 of 224.
+                key = (int(room), tile[0], tile[1])
                 count = self._tile_counts.get(key, 0) + 1
                 self._tile_counts[key] = count
                 reward += REWARD_VALUES['movement'] / math.sqrt(count)
