@@ -222,15 +222,15 @@ class ZeldaAdapter(GameAdapter):
     # Per-episode state, declared so the None-then-populate pattern below is
     # explicit about what each field eventually holds.
     old_info: dict[str, Any] | None
-    # room -> {(tile_x, tile_y): 1} for this episode only
-    visited_rooms: dict[int, dict[tuple[int, int], int]]
+    # room -> {(tile_x, tile_y, keys_held): 1} for this episode only
+    visited_rooms: dict[int, dict[tuple[int, int, int], int]]
     start_kills: int | None
 
     name = "Zelda"
     default_state = "monsters"
     actions = ACTIONS
     actions_released = ACTIONS_RELEASED
-    log_fields = ["kills", "kills_avg", "cleared", "rooms", "tiles"]
+    log_fields = ["kills", "kills_avg", "cleared", "rooms", "tiles", "keys_max", "keys_used"]
     # One plane per HUD column. Set to 0 to train on the playfield alone --
     # changing this changes the network's input shape, so checkpoints do not
     # load across the switch.
@@ -245,11 +245,11 @@ class ZeldaAdapter(GameAdapter):
         self.confined = self.state in CONFINED_STATES
         # Moving-average history of kills across episodes.
         self._kill_history: list[int] = []
-        # Lifetime visit counts, keyed (room, tile_x, tile_y). Deliberately NOT
+        # Lifetime visit counts, keyed (room, tile_x, tile_y, keys). Deliberately NOT
         # cleared in reset(): the whole point is that the bonus decays across
         # episodes, so re-walking the starting room stops paying. Lives for the
         # process, not across separate runs.
-        self._tile_counts: dict[tuple[int, int, int], int] = {}
+        self._tile_counts: dict[tuple[int, int, int, int], int] = {}
         self._cleared = False
         self.reset()
 
@@ -269,6 +269,9 @@ class ZeldaAdapter(GameAdapter):
         self.tiles_found = 0
         self.died = False
         self.abandoned = False
+        # Most keys held at once this episode, and how many were spent on doors.
+        self.keys_max = 0
+        self.keys_used = 0
         # Consecutive frames spent in the overworld; see OVERWORLD_PATIENCE.
         self.frames_outside = 0
         # Lifetime kill counter ($52A) survives death/room transitions, so we
@@ -345,6 +348,8 @@ class ZeldaAdapter(GameAdapter):
             "cleared": int(self._cleared),
             "rooms": self.rooms_found,
             "tiles": self.tiles_found,
+            "keys_max": self.keys_max,
+            "keys_used": self.keys_used,
         }
 
     def summary_line(self) -> str:
@@ -382,6 +387,8 @@ class ZeldaAdapter(GameAdapter):
 
         if on_task:
             reward += item_reward(old_info, info)
+        self.keys_max = max(self.keys_max, int(info['Keys']))
+        self.keys_used += max(int(old_info['Keys']) - int(info['Keys']), 0)
 
         info['Hearts'] = get_actual_hearts(info['Heart Containers'], info['Hearts'])
         if info['Hearts'] < old_info['Hearts']:
@@ -404,12 +411,25 @@ class ZeldaAdapter(GameAdapter):
         # familiar that tile is overall. Count-based exploration: novelty decays
         # as 1/sqrt(N), so the agent is pushed outward instead of re-sweeping
         # ground it already knows.
+        #
+        # The cell includes how many keys Link is carrying, because a room he
+        # can unlock is not the same state as one he cannot — the up door in
+        # level 1's entrance is passable with a key and a wall without one.
+        # Without this, walking back to a door after picking up a key pays
+        # nothing, since the ground is already marked visited, and the agent has
+        # no reason to backtrack. Keying on inventory makes the return trip
+        # novel on its own, with no event-triggered reset to tune.
+        #
+        # Not farmable: each (tile, key count) pays once, keys only arrive from
+        # finite pickups and only leave through finite doors, so the number of
+        # distinct key counts — and therefore re-sweeps — is bounded.
         room = info['Room']
-        tile = (int(info['Link X']) // TILE, int(info['Link Y']) // TILE)
+        keys = int(info['Keys'])
+        tile = (int(info['Link X']) // TILE, int(info['Link Y']) // TILE, keys)
         if tile not in self.visited_rooms[room]:
             self.visited_rooms[room][tile] = 1
             if on_task:
-                key = (int(room), tile[0], tile[1])
+                key = (int(room), tile[0], tile[1], keys)
                 count = self._tile_counts.get(key, 0) + 1
                 self._tile_counts[key] = count
                 reward += REWARD_VALUES['movement'] / math.sqrt(count)
