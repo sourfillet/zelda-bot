@@ -562,15 +562,30 @@ def main() -> None:
 
     # Load the game adapter (action set, reward shaping, termination, metrics).
     # It also resolves the start state, falling back to the game's default.
-    adapter = load_adapter(args.game, args.state)
+    # A comma-separated --state is a POOL: one is sampled per episode. Split it
+    # before the adapter sees it, since the adapter stores the value and Zelda
+    # reads it back to decide whether a dungeon is loaded.
+    pool = [p.strip() for p in str(args.state).split(',') if p.strip()] \
+        if args.state and ',' in str(args.state) else []
+    adapter = load_adapter(args.game, pool[0] if pool else args.state)
     # integration_name, not args.game: retro's bundled integrations are named
     # "<Game>-<Platform>", which cannot double as a Python package name.
     register_integrations()
+    # "Exploring starts": some behaviour is unreachable from the normal start,
+    # so the value function never observes the reward behind it. Measured on
+    # Zelda level 1, random play entered the room past the locked door 0/12
+    # times from `level1` and 1/12 even when placed at the door. Sampling a
+    # mixture that includes states near the reward puts it in experience without
+    # a separate curriculum stage to transfer out of.
     state_name = resolve_state(adapter.integration_name,
-                               getattr(adapter, 'state', args.state),
+                               pool[0] if pool else getattr(adapter, 'state', args.state),
                                adapter.default_state,
                                args.state_from_cli)
     # Keep the adapter in step; Zelda reads self.state for its dungeon check.
+    if pool:
+        pool = [resolve_state(adapter.integration_name, p, adapter.default_state, True)
+                for p in pool]
+        print(f"Start-state pool ({len(pool)}): {', '.join(pool)} — sampled per episode")
     adapter.state = state_name
 
     # An adapter builds a fixed number of planes, so the only safe overrides are
@@ -681,6 +696,11 @@ def main() -> None:
 
     # Train the agent
     for episode in range(args.num_episodes):
+        if pool:
+            chosen = pool[np.random.randint(len(pool))]
+            if chosen != adapter.state:
+                env.load_state(chosen, inttype=retro.data.Integrations.ALL)
+                adapter.state = chosen
 
         obs = env.reset()
         adapter.reset()

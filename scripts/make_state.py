@@ -16,14 +16,19 @@ agent from a state where the behaviour *is* reachable does.
     uv run scripts/make_state.py --from level1 --set Keys=2 --set Bombs=8 \
         --name level1_stocked
 
+    # drive the emulator after writing RAM, to reach somewhere RAM alone cannot:
+    # hold UP for 200 frames to walk through level 1's unlocked door
+    uv run scripts/make_state.py --from level1_door --press UP:200 --name level1_room99
+
 Variable names are whatever the game's data.json defines, so `--set` can only
-reach values the integration already maps. Writes games/<game>/<name>.state.
+reach values the integration already maps. `--press` takes BUTTON:FRAMES pairs
+run in order, for states that are behind a transition rather than a RAM value.
+Writes games/<game>/<name>.state.
 """
 
 import argparse
 import gzip
 import os
-import sys
 
 import numpy as np
 import retro
@@ -61,6 +66,12 @@ def main() -> None:
     ap.add_argument("--name", required=True, help="name of the state to write")
     ap.add_argument("--settle", type=int, default=SETTLE_FRAMES,
                     help=f"frames to run after writing (default {SETTLE_FRAMES})")
+    ap.add_argument("--press", action="append", default=[], metavar="BUTTON:FRAMES",
+                    help="hold a button for N frames after writing RAM (repeatable, "
+                         "run in order). Buttons: UP DOWN LEFT RIGHT A B")
+    ap.add_argument("--strict", action="store_true",
+                    help="fail if any value differs from what was asked for; by default "
+                         "the game is allowed to adjust it (positions snap to its grid)")
     ap.add_argument("--force", action="store_true",
                     help="overwrite an existing state; refuses without this")
     args = ap.parse_args()
@@ -96,14 +107,42 @@ def main() -> None:
             env.data.set_value(name, value)
     _, _, _, _, info = env.step(noop)
 
-    # Verify before writing anything — a silently-ignored variable name would
-    # otherwise produce a state that looks fine and behaves like the original.
+    # Report what actually landed. The game legitimately adjusts some values —
+    # positions snap to its own grid, so asking for Link Y=115 yields 117 — and
+    # that is not an error. --strict turns any difference into a failure.
     bad = {n: (v, int(info[n])) for n, v in overrides.items()
            if n in info and int(info[n]) != v}
-    if bad:
+    if bad and args.strict:
         env.close()
         detail = ", ".join(f"{n}: wanted {w}, got {g}" for n, (w, g) in bad.items())
-        raise SystemExit(f"values did not stick ({detail}). The game may recompute them.")
+        raise SystemExit(f"--strict: values did not stick ({detail})")
+    for n, (w, g) in bad.items():
+        print(f"note: {n} wanted {w}, game settled on {g}")
+
+    # Drive the emulator for states behind a transition — a room through a door
+    # is not something any RAM variable can set directly.
+    if args.press:
+        buttons = env.buttons if hasattr(env, "buttons") else []
+        for spec in args.press:
+            name, _, frames = spec.partition(":")
+            name = name.strip().upper()
+            if name not in buttons:
+                env.close()
+                raise SystemExit(f"unknown button {name!r}; this game has {buttons}")
+            try:
+                count = int(frames)
+            except ValueError:
+                env.close()
+                raise SystemExit(f"--press expects BUTTON:FRAMES, got {spec!r}") from None
+            act = np.zeros(env.action_space.shape, dtype=np.uint8)
+            act[buttons.index(name)] = 1
+            for _ in range(count):
+                _, _, term, trunc, info = env.step(act)
+                if term or trunc:
+                    env.close()
+                    raise SystemExit(f"episode ended while pressing {name}; "
+                                     "shorten the hold or start elsewhere")
+            print(f"  pressed {name} for {count} frames -> Room {int(info['Room'])}")
 
     blob = env.em.get_state()
     env.close()
@@ -121,9 +160,8 @@ def main() -> None:
     print(f"  from: {args.base}")
     for name, value in overrides.items():
         got = int(check[name])
-        print(f"  {name}: {value}  -> reloads as {got}" + ("" if got == value else "   MISMATCH"))
-    if any(int(check[n]) != v for n, v in overrides.items()):
-        sys.exit(1)
+        note = "" if got == value else f"   (asked {value}, game settled on {got})"
+        print(f"  {name}: reloads as {got}{note}")
 
 
 if __name__ == "__main__":
