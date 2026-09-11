@@ -5,18 +5,24 @@ from typing import Any
 
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras.layers import Conv2D, Dense, Flatten
-from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Concatenate, Conv2D, Dense, Flatten, Input
+from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
+
+from models.observation import Observation, as_tensors, model_input
 
 
 class DQNAgent:
     def __init__(self, input_shape: tuple[int, int, int], action_size: int,
                  learning_rate: float, discount_factor: float, epsilon: float,
                  epsilon_decay: float, epsilon_min: float,
-                 q_limit: float | None = None) -> None:
+                 q_limit: float | None = None, vector_size: int = 0) -> None:
         self.input_shape = input_shape  # (height, width, stacked_frames), e.g. (84, 84, 4)
         self.action_size = action_size
+        # Width of the adapter's scalar branch. 0 keeps the single-input network
+        # this class has always built, so games without a state vector are
+        # unaffected and their checkpoints still load.
+        self.vector_size = vector_size
         self.learning_rate = learning_rate
         self.discount_factor = discount_factor
         self.epsilon = epsilon
@@ -91,17 +97,30 @@ class DQNAgent:
         Huber is linear beyond delta, so a large error cannot produce a runaway
         gradient, and clipnorm bounds the step. Reward clipping in main.py bounds
         the Bellman target itself; the three together are what keep Q finite.
+
+        With `vector_size > 0` the adapter's scalars join the flattened conv
+        features just before Dense(512), so they inform the same representation
+        the Q-head reads rather than arriving as pixels the convolutions have to
+        decode first. The layer order is otherwise unchanged.
         """
-        model = Sequential()
+        planes_in = Input(shape=self.input_shape, name="planes")
         # Normalize uint8 frames [0, 255] -> [0, 1] so Q-values stay in a
         # numerically stable range (matches RainbowDQN)
-        model.add(tf.keras.layers.Rescaling(1.0 / 255.0, input_shape=self.input_shape))
-        model.add(Conv2D(32, (8, 8), strides=(4, 4), activation='relu'))
-        model.add(Conv2D(64, (4, 4), strides=(2, 2), activation='relu'))
-        model.add(Conv2D(64, (3, 3), activation='relu'))
-        model.add(Flatten())
-        model.add(Dense(512, activation='relu'))
-        model.add(Dense(self.action_size, activation='linear'))
+        x = tf.keras.layers.Rescaling(1.0 / 255.0)(planes_in)
+        x = Conv2D(32, (8, 8), strides=(4, 4), activation='relu')(x)
+        x = Conv2D(64, (4, 4), strides=(2, 2), activation='relu')(x)
+        x = Conv2D(64, (3, 3), activation='relu')(x)
+        x = Flatten()(x)
+
+        inputs: Any = planes_in
+        if self.vector_size > 0:
+            vector_in = Input(shape=(self.vector_size,), name="vector")
+            x = Concatenate()([x, vector_in])
+            inputs = [planes_in, vector_in]
+
+        x = Dense(512, activation='relu')(x)
+        q = Dense(self.action_size, activation='linear')(x)
+        model = Model(inputs=inputs, outputs=q)
         model.compile(
             loss=tf.keras.losses.Huber(delta=2.0),
             optimizer=Adam(learning_rate=self.learning_rate, clipnorm=1.0),
@@ -114,16 +133,20 @@ class DQNAgent:
         """
         self.target_model.set_weights(self.model.get_weights())
 
-    def _bootstrap_values(self, next_states: np.ndarray) -> np.ndarray:
+    def _bootstrap_values(self, next_states: Any) -> np.ndarray:
         """
         Per-sample value of the next state used in the Bellman target.
         Standard DQN: max_a Q_target(s', a). Subclasses override this to change
         the bootstrap rule (e.g. Double DQN) without touching train().
+
+        `next_states` is already a batched model input — an array, or a
+        [planes, vectors] list when the game defines a state vector — so both
+        network calls here and in subclasses take it unchanged.
         """
         target_next = self.target_model(next_states, training=False).numpy()
         return np.amax(target_next, axis=1)
 
-    def act(self, state: np.ndarray) -> np.ndarray:
+    def act(self, state: Observation) -> np.ndarray:
         """
         Choose an action based on the epsilon-greedy policy.
         Returns a one-hot encoded action vector.
@@ -134,14 +157,15 @@ class DQNAgent:
             action[action_index] = 1
             return action
 
-        q_values = self.model(state, training=False).numpy()
+        q_values = self.model(model_input([state], self.vector_size),
+                              training=False).numpy()
         action_index = int(np.argmax(q_values[0]))
         action = np.zeros(self.action_size, dtype=int)
         action[action_index] = 1
         return action
 
-    def train(self, state: np.ndarray, action: np.ndarray | int, reward: float,
-              next_state: np.ndarray, done: bool, learn: bool = True) -> float | None:
+    def train(self, state: Observation, action: np.ndarray | int, reward: float,
+              next_state: Observation, done: bool, learn: bool = True) -> float | None:
         """
         Store the transition in memory and train the model using experience replay.
         This method uses a mini-batch of past transitions and computes targets using the target network.
@@ -170,8 +194,8 @@ class DQNAgent:
         minibatch = random.sample(self.memory, self.batch_size)
 
         # Prepare arrays for training
-        states = np.vstack([sample[0] for sample in minibatch])
-        next_states = np.vstack([sample[3] for sample in minibatch])
+        states = model_input([sample[0] for sample in minibatch], self.vector_size)
+        next_states = model_input([sample[3] for sample in minibatch], self.vector_size)
         actions = [sample[1] for sample in minibatch]
         rewards = np.array([sample[2] for sample in minibatch])
         dones = np.array([sample[4] for sample in minibatch]).astype(int)
@@ -193,7 +217,7 @@ class DQNAgent:
             target[i][actions[i]] = target_val
 
         # One compiled gradient step on the updated target values
-        loss = self._train_step(tf.convert_to_tensor(states),
+        loss = self._train_step(as_tensors(states),
                                 tf.convert_to_tensor(target))
 
         # Increment the training step counter and update target network if needed

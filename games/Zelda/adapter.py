@@ -9,6 +9,7 @@ where the agent learns to kill enemies. Kill is the dominant reward signal.
 """
 
 import math
+from collections.abc import Callable
 from typing import Any
 
 import cv2
@@ -19,36 +20,62 @@ from games.base import GameAdapter
 # ----------------------------------------------------------------------------
 # Reward constants (kill is the dominant signal)
 # ----------------------------------------------------------------------------
+# The whole table — including the item values further down — is a uniform 1/5
+# rescale of the values this file used to carry. Nothing changed relative to
+# anything else; what changed is the headroom under `reward_clip`.
+#
+# At the old scale `kill_enemy` was 1.0 against a clip of 1.0, so a single kill
+# saturated the clip *exactly*. Every additional reward earned in the same
+# decision was then discarded: at `--frame_skip 16` a decision that kills an
+# enemy AND opens a door AND picks up a key trained on the identical +1.0 as a
+# decision that only killed. The decisions most worth distinguishing were the
+# ones flattened hardest.
+#
+# Raising `reward_clip` instead would not do: it sets the Bellman clamp
+# (`q_limit = clip / (1 - gamma)`) that stops the divergence documented in
+# ML_NOTES, so the clip is the fixed side and the table is the side that moves.
+# This is what PWhiddy's Pokemon Red environment does with its `reward_scale`
+# multiplier — scale the events down, leave the ceiling alone.
+#
+# Worst realistic compound decision is now ~0.8 (kill + major item + triforce +
+# new room), so ordinary play no longer touches the clip. The two terminal
+# penalties are deliberately still at -1.0 after clipping: nothing should ever
+# look better than not abandoning the dungeon.
 REWARD_VALUES = {
     # Charged once, on the transition out, so episode length cannot set its size.
-    'left_dungeon': -1.0,
+    'left_dungeon': -0.2,
     # Left the loaded dungeon, which ends the episode. Matches
     # `leave_start_room`, the equivalent gate for confined states.
-    'abandon_dungeon': -5.0,
+    'abandon_dungeon': -1.0,
     # Link leaves the room he started in. Only charged in confined mode, where
     # the point of the episode is to stay and fight (the `monsters` state).
-    'leave_start_room': -5.0,
+    'leave_start_room': -1.0,
     # Link enters a room he has not seen this episode. Positive while roaming:
     # exploration is the objective in a dungeon, not a failure. Sized to match
     # a kill so discovery and combat pull with comparable force.
-    'new_room': 1.0,
+    'new_room': 0.2,
     # Exploration bonus coefficient: a tile pays movement / sqrt(N), where N is
     # how often it has been reached this process. Familiar ground stops paying.
-    'movement': 0.05,
+    'movement': 0.01,
     # Charged every frame, so loitering in an exhausted room is unprofitable.
     # Upper bound is a constraint, not a preference: ending an episode stops the
     # clock, so |time_cost * FRAME_SKIP / (1 - discount_factor)| must stay below
     # |death| or dying becomes the cheapest way to stop paying it.
-    'time_cost': -0.0001,
+    #
+    # Recomputed for gamma 0.997 and --frame_skip 16, the current defaults:
+    #   0.00002 * 16 / 0.003 = 0.107  against  |death| = 0.2.
+    # Satisfied with ~1.9x margin. Raising gamma tightens this, so the check has
+    # to be redone whenever `discount_factor` moves, not only when this does.
+    'time_cost': -0.00002,
     # Killing an enemy (PRIMARY goal — kept dominant)
-    'kill_enemy': 1.0,
+    'kill_enemy': 0.2,
     # Heart changes
-    'heart_loss': -0.01,
-    'heart_gain': 0.01,
+    'heart_loss': -0.002,
+    'heart_gain': 0.002,
     # Must outweigh the discounted time cost of playing an episode out; see
-    # `time_cost`. Capped at 1.0 in practice because `reward_clip` bounds any
-    # single event, so `time_cost` is the side that has to move.
-    'death': -1.0,
+    # `time_cost`. `reward_clip` bounds any single event, so `time_cost` is
+    # still the side that has to move if this constraint is ever violated.
+    'death': -0.2,
 }
 
 # ----------------------------------------------------------------------------
@@ -90,19 +117,45 @@ TILE = 8
 OVERWORLD_PATIENCE = 1
 
 # ----------------------------------------------------------------------------
-# HUD planes
+# Memory planes
 # ----------------------------------------------------------------------------
-# The whole HUD band, fed to the network as its own upscaled planes. It carries
-# things the 224x240 -> 84x84 downscale destroys: the minimap position marker
-# (a 3x3-px square that moves with the room, drawn even without the Map item),
-# the equipped items, and the key/bomb/rupee counts.
+# Two planes that show the agent where it has already been.
 #
-# Columns rather than one stretched plane: the HUD is 240x56, so a single plane
-# scales 0.35x horizontally and leaves the marker smaller than the ordinary
-# downscale does. Three 80px columns scale up on both axes. Taking the whole
-# band also avoids hand-fitting a minimap rectangle per state.
-HUD_HEIGHT = 56          # playfield starts here
-HUD_COLUMNS = 3
+# This is the hole the HUD planes these replaced never filled. The tile bonus in
+# `_frame_reward` pays for novelty computed from `visited_rooms` — a dict that
+# is not in the observation at all — so "have I already swept this half of the
+# room" was unanswerable from the network's input. The shaped reward was not a
+# function of anything the agent could see, and the only thing it could learn
+# was a positional prior. That is exactly the measured pathology in ML_NOTES:
+# Q spread 0.29-0.34 across positions against 0.021-0.026 across actions.
+#
+# Both Pokemon Red environments carry the same fix. v2 feeds a 48x48 local
+# exploration map; PokeRL feeds a per-map binary visited mask aligned to world
+# coordinates and measures unique positions +40.6%, coverage 12% -> 41%, and
+# revisit ratio -35% against the identical agent without it.
+#
+# The HUD band is gone from the observation because `state_vector()` now hands
+# over the numbers it existed to convey — minimap room, key/bomb/rupee counts,
+# equipped items — exactly, as floats, instead of as a 3x3-pixel marker the
+# convolutions had to find. See STATE_VECTOR_FIELDS.
+HUD_HEIGHT = 56          # playfield starts here; frames above it are the HUD
+
+# Room-local visited mask, at the same TILE quantization the reward uses. The
+# NES frame is 256x240, so TILE=8 needs a 32x30 grid; 32x32 covers it with room
+# to spare and keeps the upscale to the network's square input clean.
+MASK_GRID = 32
+
+# Dungeon-level visited-room grid. Zelda indexes rooms as room = y * 16 + x over
+# a 16x8 map (level 1's entrance 115 is (3,7), the room past its locked door 99
+# is (3,6), the `monsters` room 116 is (4,7)), so the whole floor plan fits in
+# one 16x8 plane.
+MAP_WIDTH, MAP_HEIGHT = 16, 8
+
+# Mask intensities. Distinct rather than binary so one plane carries "been
+# there" and "here now" at once, which is what makes the plane readable as a
+# trail with a head rather than an undifferentiated blob.
+MASK_VISITED = 180
+MASK_CURRENT = 255
 
 # Game Mode ($12) values that count as active gameplay:
 # 5 = normal play, 6 = preparing scroll, 7 = scrolling, 4 = finishing scroll.
@@ -124,25 +177,18 @@ DEATH_MODES = (8, 17)
 # failure. Anything not listed here gets roaming behaviour.
 CONFINED_STATES = {"monsters"}
 
-# Save states that begin inside a dungeon (loading one but ending up in the
-# overworld means Link wandered out — a small penalty).
-DUNGEON_SAVE_STATES = {
-    "level1", "level2", "level3", "level4",
-    "level5", "level6", "level7", "level8",
-}
-
 # ----------------------------------------------------------------------------
 # Item pickups
 # ----------------------------------------------------------------------------
 # Everything below pays on a GAIN only, so spending a key or throwing a bomb
 # scores nothing. Values are tiered by what the item actually unlocks.
 
-# Plain counters — reward every unit gained.
+# Plain counters — reward every unit gained. Same 1/5 rescale as REWARD_VALUES.
 COUNTER_ITEMS = {
     # Keys gate locked doors, the main barrier to the rest of a dungeon.
-    "Keys": 0.5,
-    "Bombs": 0.1,
-    "Rupees": 0.02,
+    "Keys": 0.1,
+    "Bombs": 0.02,
+    "Rupees": 0.004,
 }
 
 # Items whose *decrease* is progress rather than loss. Keys are consumed only by
@@ -154,7 +200,26 @@ COUNTER_ITEMS = {
 # transition it earns, and pays nothing on its own: measured, keys drop at frame
 # 84 in Room 115 during normal play while the room only changes at frame 146.
 # This puts the reward on the decision that actually opened the door.
-SPEND_ITEMS = {"Keys": 0.5}
+#
+# 4x the pickup value (COUNTER_ITEMS["Keys"] = 0.1), deliberately: spending a
+# key must be strictly, obviously better than holding one. They used to be
+# equal, and the agent's revealed preference was to hoard — measured over a
+# 205-episode level1 run, it picked up a key in 81 episodes and spent one in
+# **0**, returning to the room with the locked door in only 7 of those 81.
+#
+# This is the one lever here that is NOT an attempt to pay for the journey
+# back. Rewarding the trip is what the `keys`-in-the-exploration-cell mechanism
+# tries to do, and it cannot be made to work from this direction: the journey
+# back IS a re-sweep of known ground, so any rate high enough to motivate it is
+# high enough to make re-sweeping beat spending. That was measured too — with
+# `keys` in the LIFETIME tile counter the entrance re-sweep paid ~+2.5 against
+# +1.5 for the unlock. Leave the trip unpaid, make the destination worth
+# reaching, and let the value function propagate it.
+#
+# Which it can only do once it has observed the event at all. At 0 in 66,441
+# decisions, no reward weight here changes anything on its own — this pairs
+# with the curriculum pool (`level1_door` et al.), it does not replace it.
+SPEND_ITEMS = {"Keys": 0.4}
 
 # One-time acquisitions and upgrades. RAM holds a type or flag (sword 1-3,
 # candle 1-2, ...), so any increase is an acquisition. Sized to match a kill.
@@ -163,24 +228,37 @@ MAJOR_ITEMS = [
     "Ladder", "Letter", "Magic Book", "Magical Key", "Magical Rod", "Potion",
     "Power Bracelet", "Raft", "Ring", "Shield", "Sword",
 ]
-MAJOR_ITEM_REWARD = 1.0
+MAJOR_ITEM_REWARD = 0.2
 
 # Temporary powerup, not an acquisition.
-MINOR_ITEMS = {"Clock": 0.2}
+MINOR_ITEMS = {"Clock": 0.04}
 
 # Per-level bitfields, one bit per dungeon. Counted by newly-set bits so a
 # second dungeon's map still scores once the first is held.
 BITFIELD_ITEMS = {
     # The scenario's actual objective.
-    "Triforce Pieces": 1.0,
-    "Map": 0.3,
-    "Compass": 0.3,
+    "Triforce Pieces": 0.2,
+    "Map": 0.06,
+    "Compass": 0.06,
 }
 
 # $066F packs filled hearts in the low nibble and (containers - 1) in the high.
 # Only the high nibble is an acquisition; healing and damage are handled by
 # `heart_gain`/`heart_loss` from the decoded value.
-HEART_CONTAINER_REWARD = 1.0
+HEART_CONTAINER_REWARD = 0.2
+
+
+# Snapshotted into each run's config.json alongside REWARD_VALUES. Without it a
+# run directory records only half its reward table, so `key_used` — which is now
+# a value that varies between runs — could not be recovered after the fact.
+REWARD_ITEMS: dict[str, Any] = {
+    "counter_items": COUNTER_ITEMS,
+    "spend_items": SPEND_ITEMS,
+    "minor_items": MINOR_ITEMS,
+    "bitfield_items": BITFIELD_ITEMS,
+    "major_item_reward": MAJOR_ITEM_REWARD,
+    "heart_container_reward": HEART_CONTAINER_REWARD,
+}
 
 
 def item_reward(old: dict[str, Any], new: dict[str, Any]) -> float:
@@ -218,6 +296,67 @@ def get_actual_hearts(containers: int = 0, partial: int = 0) -> float:
     return filled
 
 
+def _bits(value: Any) -> int:
+    """Population count of one RAM byte, for the per-level bitfields."""
+    return bin(int(value) & 0xFF).count("1")
+
+
+# ----------------------------------------------------------------------------
+# Scalar state vector
+# ----------------------------------------------------------------------------
+# Everything the emulator already knows exactly, handed to the network as
+# numbers instead of pixels. The order here IS the vector layout, and
+# `vector_size` derives from the list, so adding a field needs no second edit.
+#
+# Each entry reads the adapter's most recent normal-play `info` dict and returns
+# roughly [0, 1] — the branch feeds straight into a Dense layer, so a raw room
+# id of 115 sitting beside a 0-or-1 flag would dominate it.
+#
+# Three of these were previously encoded as 84x84 HUD planes and nothing else:
+# `keys`/`bombs`/`rupees` were the counter digits, and `room_x`/`room_y` were
+# the minimap marker. Two floats beat locating a 3x3-pixel square, and room
+# coordinates are strictly more informative than the marker ever was, since the
+# minimap lights only the current room.
+#
+# `hearts` reads the value AFTER `_frame_reward` has decoded it in place via
+# get_actual_hearts(), not the raw packed byte.
+STATE_VECTOR_FIELDS: list[tuple[str, Callable[[dict[str, Any]], float]]] = [
+    # Inventory that gates progress.
+    ("keys", lambda i: min(int(i["Keys"]), 3) / 3.0),
+    ("bombs", lambda i: min(int(i["Bombs"]), 8) / 8.0),
+    ("rupees", lambda i: min(int(i["Rupees"]), 255) / 255.0),
+    # Survival.
+    ("hearts", lambda i: min(float(i["Hearts"]), 16.0) / 16.0),
+    ("heart_containers", lambda i: (((int(i["Heart Containers"]) >> 4) + 1) / 16.0)),
+    # Where Link is, at both scales. Room is decomposed into map coordinates
+    # rather than passed as an id, since 115 and 116 are adjacent rooms but
+    # nothing about the raw numbers says so on the vertical axis.
+    ("room_x", lambda i: (int(i["Room"]) % MAP_WIDTH) / (MAP_WIDTH - 1)),
+    ("room_y", lambda i: (int(i["Room"]) // MAP_WIDTH) / (MAP_HEIGHT - 1)),
+    ("link_x", lambda i: int(i["Link X"]) / 255.0),
+    ("link_y", lambda i: int(i["Link Y"]) / 255.0),
+    ("level", lambda i: int(i["Level"]) / 9.0),
+    # Equipment. Sword and candle are tiers; the rest are have/have-not.
+    ("sword", lambda i: min(int(i["Sword"]), 3) / 3.0),
+    ("candle", lambda i: min(int(i["Candle"]), 2) / 2.0),
+    ("bow", lambda i: float(int(i["Bow"]) > 0)),
+    ("ladder", lambda i: float(int(i["Ladder"]) > 0)),
+    ("raft", lambda i: float(int(i["Raft"]) > 0)),
+    ("boomerang", lambda i: float(int(i["Boomerang"]) > 0)),
+    ("magical_key", lambda i: float(int(i["Magical Key"]) > 0)),
+    ("power_bracelet", lambda i: float(int(i["Power Bracelet"]) > 0)),
+    # Per-level bitfields, as a fraction of the eight dungeons.
+    ("triforce", lambda i: _bits(i["Triforce Pieces"]) / 8.0),
+    ("maps", lambda i: _bits(i["Map"]) / 8.0),
+    ("compasses", lambda i: _bits(i["Compass"]) / 8.0),
+    # Whether this room has combat in it at all, which the playfield shows only
+    # once an enemy is on screen.
+    ("room_enemies", lambda i: min(int(i["Enemies Spawned In Room"]), 8) / 8.0),
+]
+
+STATE_VECTOR_SIZE = len(STATE_VECTOR_FIELDS)
+
+
 class ZeldaAdapter(GameAdapter):
     # Per-episode state, declared so the None-then-populate pattern below is
     # explicit about what each field eventually holds.
@@ -225,17 +364,23 @@ class ZeldaAdapter(GameAdapter):
     # room -> {(tile_x, tile_y, keys_held): 1} for this episode only
     visited_rooms: dict[int, dict[tuple[int, int, int], int]]
     start_kills: int | None
+    start_level: int | None
+    start_keys: int | None
 
     name = "Zelda"
     default_state = "monsters"
     actions = ACTIONS
     actions_released = ACTIONS_RELEASED
-    log_fields = ["kills", "kills_avg", "cleared", "rooms", "tiles", "keys_max",
-                  "keys_used", "key_backtrack"]
-    # One plane per HUD column. Set to 0 to train on the playfield alone --
-    # changing this changes the network's input shape, so checkpoints do not
-    # load across the switch.
-    extra_planes = HUD_COLUMNS
+    log_fields = ["kills", "kills_avg", "cleared", "rooms", "tiles", "tile_reward",
+                  "keys_max", "keys_used", "key_backtrack"]
+    # Two memory planes: the current room's visited-tile mask and the dungeon's
+    # visited-room map. Set to 0 to train on the playfield alone -- changing
+    # this changes the network's input shape, so checkpoints do not load across
+    # the switch. (It was 3 HUD columns; see the Memory planes section.)
+    extra_planes = 2
+    # Inventory, position and equipment as scalars. main.py widens the actual
+    # network branch with a one-hot history of recent actions.
+    vector_size = STATE_VECTOR_SIZE
 
     def __init__(self, state: str | None = None) -> None:
         # Start state matters for the dungeon-in-overworld penalty, and for
@@ -266,8 +411,22 @@ class ZeldaAdapter(GameAdapter):
         # visited_rooms with it is what replaces the old hardcoded `!= 116`
         # check: the starting room is never "new", whichever room it is.
         self.start_room: int | None = None
+        # Whether leaving for Level 0 is off-task comes from RAM, not the save
+        # state's filename. Curriculum states and future custom dungeon states
+        # must behave exactly like the base level1-level8 states they derive
+        # from, without maintaining a second whitelist here.
+        self.start_level = None
+        # A curriculum state that starts with a key has no pre-pickup visit set
+        # to carry forward. Its starting room is treated as the pickup room for
+        # movement reward purposes, preventing `level1_key` from paying a fresh
+        # sweep of the empty entrance before the agent tries the door.
+        self.start_keys = None
         self.rooms_found = 0
         self.tiles_found = 0
+        # Tile bonus actually paid this episode. The one reward term that is not
+        # stationary (it decays on the lifetime `_tile_counts`), tracked so it
+        # can be logged and excluded from `checkpoint_score`.
+        self.tile_reward = 0.0
         self.died = False
         self.abandoned = False
         # Most keys held at once this episode, and how many were spent on doors.
@@ -285,6 +444,18 @@ class ZeldaAdapter(GameAdapter):
         self.start_kills = None
         self.start_spawned = 0
         self.episode_kills = 0
+        # Memory planes, cleared every episode because they answer "where have I
+        # been THIS episode" — the question the per-episode tile reward asks.
+        # (The lifetime `_tile_counts` deliberately survives reset; these are a
+        # different quantity and must not.)
+        #
+        # room -> (MASK_GRID, MASK_GRID) mask, keyed by room so walking back into
+        # an earlier room restores its trail rather than showing a blank sheet.
+        self._room_masks: dict[int, np.ndarray] = {}
+        self._room_map = np.zeros((MAP_HEIGHT, MAP_WIDTH), dtype=np.uint8)
+        # Cell the last mark landed on, drawn at MASK_CURRENT so the plane shows
+        # a head as well as a trail.
+        self._mask_here: tuple[int, int, int] | None = None
 
     def step(self, info: dict[str, Any], frame: int) -> tuple[float, bool]:
         """One emulated frame -> (reward, done)."""
@@ -328,20 +499,61 @@ class ZeldaAdapter(GameAdapter):
         # `reward` is not carried in here — that would double-charge.
         return self._frame_reward(info), self.died or self.abandoned
 
+    def _mark_visited(self, room: int, link_x: int, link_y: int) -> None:
+        """Record one normal-play position into both memory planes.
+
+        Called on every normal-play frame rather than only on novel tiles, so
+        the `MASK_CURRENT` head tracks Link continuously instead of freezing
+        wherever he last found new ground.
+        """
+        mask = self._room_masks.get(room)
+        if mask is None:
+            mask = np.zeros((MASK_GRID, MASK_GRID), dtype=np.uint8)
+            self._room_masks[room] = mask
+        tile_x = min(link_x // TILE, MASK_GRID - 1)
+        tile_y = min(link_y // TILE, MASK_GRID - 1)
+        mask[tile_y, tile_x] = MASK_VISITED
+        self._mask_here = (room, tile_x, tile_y)
+        self._room_map[min(room // MAP_WIDTH, MAP_HEIGHT - 1),
+                       room % MAP_WIDTH] = MASK_VISITED
+
     def extra_observation(self, frame: Any, size: int = 84) -> Any:
-        """Slice the HUD band into columns, each upscaled to its own plane."""
+        """Build the two memory planes: visited tiles here, visited rooms overall.
+
+        `frame` is unused — unlike the HUD planes these replaced, nothing here
+        is read off the screen. Both planes are drawn from the adapter's own
+        per-episode history and upscaled with INTER_NEAREST, which keeps single
+        visited cells as hard squares instead of smearing them into the
+        background the way interpolation would.
+        """
         if self.extra_planes < 1:
             return None
-        hud = frame[:HUD_HEIGHT]
-        if hud.ndim == 3:
-            hud = cv2.cvtColor(hud, cv2.COLOR_RGB2GRAY)
-        width = hud.shape[1] // HUD_COLUMNS
-        # INTER_NEAREST keeps small features hard-edged rather than blurring
-        # them into their background, which is the whole point of the planes.
-        planes = [cv2.resize(hud[:, i * width:(i + 1) * width], (size, size),
-                             interpolation=cv2.INTER_NEAREST)
-                  for i in range(HUD_COLUMNS)]
+
+        tiles = np.zeros((MASK_GRID, MASK_GRID), dtype=np.uint8)
+        rooms = self._room_map.copy()
+        if self._mask_here is not None:
+            room, tile_x, tile_y = self._mask_here
+            tiles = self._room_masks[room].copy()
+            tiles[tile_y, tile_x] = MASK_CURRENT
+            rooms[min(room // MAP_WIDTH, MAP_HEIGHT - 1),
+                  room % MAP_WIDTH] = MASK_CURRENT
+
+        planes = [cv2.resize(plane, (size, size), interpolation=cv2.INTER_NEAREST)
+                  for plane in (tiles, rooms)]
         return np.stack(planes, axis=2)
+
+    def state_vector(self) -> Any:
+        """Inventory, position and equipment as floats. See STATE_VECTOR_FIELDS.
+
+        Reads the last normal-play frame. Returns None before the first one, so
+        the opening decision of an episode sees zeros rather than stale values
+        carried over from the previous episode.
+        """
+        if self.old_info is None:
+            return None
+        info = self.old_info
+        return np.array([read(info) for _, read in STATE_VECTOR_FIELDS],
+                        dtype=np.float32)
 
     def episode_stats(self) -> dict[str, Any]:
         self._kill_history.append(self.episode_kills)
@@ -354,10 +566,27 @@ class ZeldaAdapter(GameAdapter):
             "cleared": int(self._cleared),
             "rooms": self.rooms_found,
             "tiles": self.tiles_found,
+            "tile_reward": round(self.tile_reward, 4),
             "keys_max": self.keys_max,
             "keys_used": self.keys_used,
             "key_backtrack": self.key_backtrack,
         }
+
+    def checkpoint_score(self, episode_reward: float, stats: dict[str, Any]) -> float:
+        """The episode's return with the decaying tile bonus taken out.
+
+        What remains — kills, rooms, items, keys, deaths, the clock — pays the
+        same for the same behaviour at episode 5 as at episode 500, so it can be
+        compared across a run. The tile term cannot: measured on a 500-episode
+        level1 run it paid ~1.9 on episode 29 (228 fresh tiles at near-full
+        rate) and ~0.03 by episode 450, which is how a 76%-random policy held
+        `best.keras` over one killing 4.2 enemies an episode.
+
+        Uses the same weights the agent is trained on rather than a hand-picked
+        metric like kills + rooms, so there is only one definition of "good" and
+        spending a key (0.4) automatically ranks above a kill (0.2).
+        """
+        return episode_reward - self.tile_reward
 
     def summary_line(self) -> str:
         cleared = " - ROOM CLEARED!" if self._cleared else ""
@@ -376,28 +605,52 @@ class ZeldaAdapter(GameAdapter):
                 self.old_info['Heart Containers'], self.old_info['Hearts'])
             # Seed the starting room so it is never counted as a discovery.
             self.start_room = int(info['Room'])
+            self.start_level = int(info['Level'])
+            self.start_keys = int(info['Keys'])
             self.visited_rooms.setdefault(self.start_room, {})
+            self._mark_visited(self.start_room, int(info['Link X']),
+                               int(info['Link Y']))
             return 0.0
 
         reward = 0.0
         old_info = self.old_info
 
-        # Nothing off-task pays: with a dungeon state loaded, the overworld is
-        # 128 unseen rooms and its own enemies, which outbids the dungeon.
-        on_task = not (self.state in DUNGEON_SAVE_STATES and int(info['Level']) < 1)
+        # Nothing off-task pays: when an episode began in a dungeon, the
+        # overworld is 128 unseen rooms and its own enemies, which outbids the
+        # dungeon. Infer that from the initial RAM Level rather than a save-state
+        # name so level1_key/door/room99 and arbitrary future curriculum states
+        # cannot accidentally disable the boundary.
+        started_in_dungeon = self.start_level is not None and self.start_level > 0
+        on_task = not (started_in_dungeon and int(info['Level']) < 1)
 
         # Walked out of the dungeon he was loaded into — charge once, on the
         # transition, not for every frame spent outside.
-        if (self.state in DUNGEON_SAVE_STATES
-                and int(info['Level']) < 1 <= int(old_info['Level'])):
+        if started_in_dungeon and int(info['Level']) < 1 <= int(old_info['Level']):
             reward += REWARD_VALUES['left_dungeon']
 
         if on_task:
             reward += item_reward(old_info, info)
-        self.keys_max = max(self.keys_max, int(info['Keys']))
-        if int(info['Keys']) > 0 and int(info['Room']) == self.start_room:
+        old_keys = int(old_info['Keys'])
+        keys = int(info['Keys'])
+        room = int(info['Room'])
+        self._mark_visited(room, int(info['Link X']), int(info['Link Y']))
+        self.keys_max = max(self.keys_max, keys)
+        if keys > 0 and room == self.start_room:
             self.key_backtrack += 1
-        self.keys_used += max(int(old_info['Keys']) - int(info['Keys']), 0)
+        self.keys_used += max(old_keys - keys, 0)
+
+        # Inventory remains part of the per-episode exploration state so rooms
+        # visited earlier can become worth backtracking through with a key. Do
+        # not renew tiles in the room where the key was found, though: that paid
+        # the agent to sweep the now-empty combat room before starting the long
+        # return trip. Carry every position already seen here into the new key
+        # slice; other rooms deliberately keep only their old-key entries.
+        if keys > old_keys:
+            visited_here = self.visited_rooms.get(room)
+            if visited_here:
+                positions = {(tile_x, tile_y) for tile_x, tile_y, _ in visited_here}
+                visited_here.update({(tile_x, tile_y, keys): 1
+                                     for tile_x, tile_y in positions})
 
         info['Hearts'] = get_actual_hearts(info['Heart Containers'], info['Hearts'])
         if info['Hearts'] < old_info['Hearts']:
@@ -425,31 +678,39 @@ class ZeldaAdapter(GameAdapter):
         # can unlock is not the same state as one he cannot — the up door in
         # level 1's entrance is passable with a key and a wall without one.
         # Without this, walking back to a door after picking up a key pays
-        # nothing, since the ground is already marked visited, and the agent has
-        # no reason to backtrack. Keying on inventory makes the return trip
-        # novel on its own, with no event-triggered reset to tune.
+        # nothing, since the ground is already marked visited. The pickup-room
+        # carryover above prevents this from also renewing the cleared room.
         #
         # Not farmable: each (tile, key count) pays once, keys only arrive from
         # finite pickups and only leave through finite doors, so the number of
         # distinct key counts — and therefore re-sweeps — is bounded.
-        room = info['Room']
-        keys = int(info['Keys'])
         tile = (int(info['Link X']) // TILE, int(info['Link Y']) // TILE, keys)
         if tile not in self.visited_rooms[room]:
             self.visited_rooms[room][tile] = 1
             if on_task:
                 # The per-episode cell above includes `keys`, so a key pickup
-                # makes known ground payable again. The LIFETIME counter
-                # deliberately does not: a re-sweep should pay at the decayed
-                # rate, not full. Keyed on inventory here too, re-sweeping the
-                # entrance at keys=1 paid ~+2.5 against +1.5 for actually
-                # spending the key (key_used 0.5 + new_room 1.0) — and the agent
-                # collected a key in 40% of episodes while spending one in
-                # 0 of 224.
+                # makes known ground in earlier rooms payable again. The
+                # pickup room's known tiles were copied into the new key slice
+                # above, preventing an immediate empty-room re-sweep. The
+                # LIFETIME counter deliberately omits inventory either way, so
+                # rewarded backtracking pays at the decayed rate, not full.
                 key = (int(room), tile[0], tile[1])
                 count = self._tile_counts.get(key, 0) + 1
                 self._tile_counts[key] = count
-                reward += REWARD_VALUES['movement'] / math.sqrt(count)
+                # `level1_key` and `level1_door` begin in the empty entrance
+                # with a key already held, so there is no earlier keyless slice
+                # whose positions can be copied. Count those visits normally
+                # but do not reward them; leaving the room exposes ordinary
+                # new-room/tile rewards, while loitering only pays the clock.
+                suppress_start_key_room = (
+                    self.start_keys is not None
+                    and self.start_keys > 0
+                    and room == self.start_room
+                )
+                if not suppress_start_key_room:
+                    tile_bonus = REWARD_VALUES['movement'] / math.sqrt(count)
+                    reward += tile_bonus
+                    self.tile_reward += tile_bonus
                 self.tiles_found += 1
 
         # Committed to the overworld rather than briefly clipping the boundary.

@@ -10,7 +10,7 @@ The main goal is, of course, to see if an agent can beat The Legend of Zelda. Gi
 
 ## Isn't Zelda too complicated for an RL agent? What is the plan here?
 
-The current training target is a single isolated combat room (the `monsters` state), where the agent learns to reliably kill enemies. From there the plan is to work up to clearing whole dungeons, and eventually to navigating the overworld. The full plan lives in [games/Zelda/ROADMAP.md](games/Zelda/ROADMAP.md).
+The agent first learned to clear a single isolated combat room (the `monsters` state). The current target is dungeon 1, and in particular fetching a key and using it on a locked door: plain exploration never managed it (0 key uses in 486 episodes), while training from a mix of start states near the door did (178 in 500). The eventual goal is navigating the overworld. The full plan lives in [games/Zelda/ROADMAP.md](games/Zelda/ROADMAP.md).
 
 ## Does this include the game itself?
 
@@ -43,8 +43,10 @@ The training loop is game-agnostic. Everything Zelda-specific — the action set
         ROADMAP.md       Where this project is going
         ram_search.py    RAM discovery tool
         *.state          Save states (gamestart, level1-8, monsters)
-    models/              DQN, DoubleDQN, RainbowDQN
-    scripts/             Utility and smoke-test scripts
+    models/              DQN, DoubleDQN, RainbowDQN, RND, observation helpers
+    scripts/             Curriculum-state minting, the exploration-archive trial, smoke tests
+    tests/               unittest suite
+    modelargs*.json      Training configs (plain level 1, and the curriculum pool)
 
 ## What models are provided?
 
@@ -90,21 +92,25 @@ Ruff and Mypy are configured in `pyproject.toml` and installed by `uv sync` as a
     uv run ruff check .   # add --fix to apply the safe fixes
     uv run mypy
 
+The tests use the standard library's unittest. The emulator-backed ones skip unless the ROM is in place:
+
+    uv run python -m unittest discover -s tests -t .
+
 Every function is annotated, and Mypy runs with `disallow_untyped_defs` so that stays true. Third-party calls still come back as `Any` (retro, TensorFlow and OpenCV ship no usable stubs), which is why the `disallow_any_*` options are left off. `NPY002` is switched off in Ruff on purpose — migrating `np.random.*` to `Generator` would change the RNG stream and therefore every training trajectory, which is a behavioural change rather than a lint fix.
 
 ### Training the models
 
 Once gym-retro is set up and the game is integrated, you can train the models by running main.py:
 
-    uv run main.py --config modelargs.json
+    uv run main.py --config modelargs_pool.json
 
-The defaults in `modelargs.json` run 500 episodes of RainbowDQN on the `monsters` combat room. That takes roughly 4-8 hours on a 3060 Ti, and kills-per-episode should start climbing somewhere around episode 100-200.
+`modelargs_pool.json` runs 500 episodes of RainbowDQN on dungeon 1, sampling one of four start states per episode: the entrance, the entrance holding a key, the locked door, and the room behind it. `modelargs.json` trains from the plain entrance, but it does not set `frame_skip`, so pass `--frame_skip 16` with it; at the default of 4 the locked door is unreachable. A 500-episode run takes about 5 hours on a 3060 Ti.
 
 Configuration settings can be set either in modelargs.json or on the command line by specifying --arg and following it with an appropriate value. Command line arguments override the config file. The arguments are listed below:
 
 * **config**: path to the JSON config file to read defaults from. Defaults to `modelargs.json`.
 * **game**: the game to train on, matching a directory under `games/`. Defaults to **Zelda**.
-* **state**: determines which save state to load the game in. Under the game's folder there are multiple states. **gamestart** starts the player at the beginning of the game, each **level state** (levelx.state) starts at dungeon x with the minimum needed to get to or beat that dungeon, and **monsters** is an isolated combat room. Use only the name of the state, without the file extension. If omitted, the game adapter's default state is used.
+* **state**: determines which save state to load the game in. Under the game's folder there are multiple states. **gamestart** starts the player at the beginning of the game, each **level state** (levelx.state) starts at dungeon x with the minimum needed to get to or beat that dungeon, and **monsters** is an isolated combat room. Use only the name of the state, without the file extension. If omitted, the game adapter's default state is used. A comma-separated list samples one state per episode; the `level1_key`, `level1_door` and `level1_room99` curriculum states are described in [CLAUDE.md](CLAUDE.md).
 * **model**: which agent to train — **DQN**, **DoubleDQN**, or **RainbowDQN**.
 * **num_episodes**: the number of episodes for the model to run.
 * **learning_rate**: controls how quickly the model updates its parameters during training.
@@ -115,8 +121,14 @@ Configuration settings can be set either in modelargs.json or on the command lin
 * **max_frames**: the maximum amount of frames for the agent to step through in one episode.
 * **load_model**: `latest`, or a path to a specific checkpoint. See below.
 * **record_freq**: record a video of every Nth episode. Defaults to 25.
+* Further flags (`frame_skip`, `n_steps`, `no_state_vector`, `extra_planes`, `rnd_beta`, `run_root` and more) are documented in [CLAUDE.md](CLAUDE.md).
 
-Each run gets its own directory under `runs/<game>/<timestamp>__<model>__<state>/` holding its checkpoints, recordings, per-episode `training_log.csv`, and a `config.json` recording exactly which arguments produced it. `runs/index.csv` lists every run.
+Each run gets its own directory under `runs/<game>/<timestamp>__<model>__<state>/` holding its checkpoints, recordings, per-episode `training_log.csv`, and a `config.json` recording exactly which arguments produced it. `runs/index.csv` lists every run. `best.keras` is the checkpoint with the best 20-episode average score, and `summary.json` records which episode it came from.
+
+For an opt-in comparison of ordinary starts and automatically discovered emulator
+snapshots with the same Rainbow DQN learner, see the
+[automatic exploration starts experiment](scripts/ARCHIVE_TRIAL.md). It runs both
+conditions with equal training frame budgets and evaluates from the original start.
 
 ### Loading models
 
@@ -151,9 +163,10 @@ Two reference implementations: [games/Zelda/adapter.py](games/Zelda/adapter.py) 
 
 ## To-do list
 
+* Run the [exploration-archive trial](scripts/ARCHIVE_TRIAL.md) and see whether automatically discovered start states teach the key round trip from the dungeon entrance.
+* Find out why training degrades late in a run (the curriculum run walked out of the dungeon every episode from episode 460).
 * Finish Rainbow: Noisy Nets to replace fixed epsilon-greedy, and distributional returns (C51 or QR-DQN).
-* Tune the reward function to encourage exploration once training moves past a single room.
-* Add intrinsic curiosity (RND) for dungeon navigation.
+* Run several emulators in parallel. stable-retro allows one per process, so this means worker processes.
 * Create a function to allow the user to update values (such as giving the agent specific weapons, number of rupees, etc.) defined in a JSON file.
 * Create a more robust model load feature and allow user to load model based on arguments.
 

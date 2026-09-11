@@ -42,6 +42,17 @@ class GameAdapter:
     # destroys — see ZeldaAdapter, whose HUD carries a position marker and the
     # key/bomb counts that the full-frame downscale reduces to a few pixels.
     extra_planes: int = 0
+    # Width of this game's scalar state vector, fed to the network as a separate
+    # branch joined to the flattened conv features rather than rendered into
+    # pixels. 0 (the default) means the network sees planes only, exactly as
+    # before. Set it when the emulator already knows a fact exactly — inventory
+    # counts, room coordinates, health — since making the convolutions re-derive
+    # a number out of a downscaled HUD is work that buys nothing.
+    #
+    # main.py appends a one-hot history of the last few actions to whatever the
+    # adapter returns, so the network's actual vector input is wider than this;
+    # see RECENT_ACTIONS there.
+    vector_size: int = 0
     # resolved start state for this run. Subclasses set it in __init__; main.py
     # re-sets it after validating the state against the game's available ones.
     state: str | None = None
@@ -88,9 +99,41 @@ class GameAdapter:
         """
         return None
 
+    def state_vector(self) -> Any:
+        """This game's scalar observation branch, or None when it defines none.
+
+        Returns a float32 array of length ``vector_size``, read from whatever
+        the adapter last saw in ``step()`` — no frame is passed in, because the
+        whole point is that these values come from RAM rather than pixels.
+
+        Called once per decision, after the frame-skip window. It must tolerate
+        being called before the first ``step()`` of an episode, where the
+        adapter has not seen a frame yet; returning None there is fine and
+        main.py substitutes zeros.
+        """
+        return None
+
     def episode_stats(self) -> dict[str, Any]:
         """Return a {column: value} dict for ``log_fields`` at episode end."""
         return {}
+
+    def checkpoint_score(self, episode_reward: float, stats: dict[str, Any]) -> float:
+        """How good this episode was, for choosing which checkpoint is `best.keras`.
+
+        Defaults to the logged return. Override it when any part of the reward
+        changes over the course of a run, because main.py compares this value
+        across episodes and a drifting term makes that comparison meaningless.
+
+        Zelda is why this hook exists. Its tile bonus decays on a lifetime
+        counter, so the same behaviour earns less every episode, and `best.keras`
+        ended up holding episode 29 of a 500-episode run: a 76%-random policy
+        that out-scored every later, genuinely better one on stale tile reward.
+
+        Called once per episode, after ``episode_stats()``, with the dict it
+        returned. main.py averages this over a trailing window before comparing,
+        so a single lucky episode cannot claim the checkpoint on its own.
+        """
+        return episode_reward
 
     def summary_line(self) -> str:
         """Optional human-readable one-liner printed to the console per episode."""

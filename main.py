@@ -19,6 +19,7 @@ from games import load_adapter
 from games.base import GameAdapter
 from models.DoubleDQN import DoubleDQNAgent
 from models.DQN import DQNAgent
+from models.observation import Observation
 from models.RainbowDQN import RainbowDQNAgent
 from models.RND import RNDNovelty
 
@@ -47,6 +48,47 @@ def input_shape(adapter: "GameAdapter", size: int = DEFAULT_INPUT_SIZE) -> tuple
     """Network input shape for this game."""
     return (size, size, STACK_FRAMES + adapter.extra_planes)
 
+# How many past actions are one-hot encoded into the state vector. A policy
+# cannot notice it is looping if its input never says what it just did, and
+# oscillation is the failure mode both Pokemon Red papers spend the most effort
+# on — PokeRL measures loop episodes at 41.2% before its anti-loop work. The
+# Pokemon Red v2 observation carries the same field at the same width.
+RECENT_ACTIONS = 3
+
+
+def vector_width(adapter: "GameAdapter", action_size: int) -> int:
+    """Width of the network's scalar branch, or 0 when the game defines none.
+
+    The action history rides along only for games that already opt into a state
+    vector, so an adapter that defines none keeps a single-input network and its
+    existing checkpoints.
+    """
+    if adapter.vector_size <= 0:
+        return 0
+    return adapter.vector_size + RECENT_ACTIONS * action_size
+
+
+def build_state_vector(adapter: "GameAdapter", recent: deque,
+                       action_size: int) -> np.ndarray | None:
+    """Adapter scalars followed by a one-hot history of the last actions.
+
+    `recent` holds action indices most-recent-first, padded with None early in
+    an episode. Returns (1, vector_width) so it batches like the plane stack.
+    """
+    if adapter.vector_size <= 0:
+        return None
+    values = adapter.state_vector()
+    if values is None:
+        # Before the adapter's first frame of an episode. Zeros rather than the
+        # previous episode's trailing values, which would be actively wrong.
+        values = np.zeros(adapter.vector_size, dtype=np.float32)
+    history = np.zeros(RECENT_ACTIONS * action_size, dtype=np.float32)
+    for slot, index in enumerate(recent):
+        if index is not None:
+            history[slot * action_size + index] = 1.0
+    return np.concatenate([np.asarray(values, dtype=np.float32),
+                           history]).reshape(1, -1)
+
 # Repeat each chosen action for this many emulated frames (standard Atari
 # frame skip). Rewards from every frame are accumulated into the stored
 # transition, so no reward signal is lost. The game adapter supplies the
@@ -65,19 +107,22 @@ def preprocess_frame(obs: np.ndarray | tuple,
     frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
     return np.reshape(frame, [size, size, 1])
 
-def get_stacked_state(frame_stack: deque, extra: np.ndarray | None = None) -> np.ndarray:
+def get_stacked_state(frame_stack: deque, extra: np.ndarray | None = None,
+                      vector: np.ndarray | None = None) -> Observation:
     """
     Concatenate the frame stack, then any adapter planes, along the channels.
-    Returns shape (1, size, size, STACK_FRAMES + extra_planes) for inference.
+    Planes come out as (1, size, size, STACK_FRAMES + extra_planes); `vector`
+    rides alongside untouched as the network's second input.
     """
     planes = list(frame_stack)
     if extra is not None:
         planes.append(extra)
     stacked = np.concatenate(planes, axis=2)
-    return np.reshape(stacked, [1, *stacked.shape])
+    return Observation(planes=np.reshape(stacked, [1, *stacked.shape]),
+                       vector=vector)
 
 
-def save_debug_frame(raw: np.ndarray, state: np.ndarray, run_dir: str,
+def save_debug_frame(raw: np.ndarray, observation: Observation, run_dir: str,
                      episode: int, frame: int) -> None:
     """
     Write one image showing exactly what the network was fed.
@@ -90,6 +135,7 @@ def save_debug_frame(raw: np.ndarray, state: np.ndarray, run_dir: str,
     out_dir = os.path.join(run_dir, "debug")
     os.makedirs(out_dir, exist_ok=True)
 
+    state = observation.planes
     planes = [state[0, :, :, i] for i in range(state.shape[3])]
     edge = state.shape[1]
     # keep tiles a readable size whatever the input resolution
@@ -121,15 +167,29 @@ def save_debug_frame(raw: np.ndarray, state: np.ndarray, run_dir: str,
     h = grid.shape[0]
     raw_scaled = cv2.resize(raw_bgr, (int(raw_bgr.shape[1] * h / raw_bgr.shape[0]), h))
     canvas = np.hstack([np.pad(raw_scaled, ((0, 0), (pad, pad), (0, 0))), grid])
-    cv2.imwrite(os.path.join(out_dir, f"ep{episode:04d}_f{frame:05d}.png"), canvas)
+    stem = os.path.join(out_dir, f"ep{episode:04d}_f{frame:05d}")
+    cv2.imwrite(f"{stem}.png", canvas)
+
+    # The scalar branch is half the network input and cannot be drawn, so it
+    # goes beside the image as text. Without this the flag's promise — "exactly
+    # what the network was fed" — would only cover the planes.
+    if observation.vector is not None:
+        values = ", ".join(f"{v:.3f}" for v in observation.vector[0])
+        with open(f"{stem}.txt", "w") as f:
+            f.write(f"vector[{observation.vector.shape[1]}]: {values}\n")
 
 def clip_reward(reward: float, limit: float | None) -> float:
     """
     Clamp a per-decision reward to +/- limit; a non-positive limit disables it.
 
-    With gamma=0.99 a limit of 1.0 caps any legitimate |Q| at about 100, so a
-    larger value is unambiguously divergence rather than a plausible estimate.
+    A limit of 1.0 caps any legitimate |Q| at 1 / (1 - gamma) — about 100 at
+    gamma 0.99, about 333 at the current default of 0.997 — so a larger value is
+    unambiguously divergence rather than a plausible estimate.
     Only the training signal is clipped — logged episode returns stay raw.
+
+    This is the fixed side of the reward budget: the adapter's event values are
+    sized to fit under it, not the other way round. See REWARD_VALUES in
+    games/Zelda/adapter.py.
     """
     if limit is None or limit <= 0:
         return reward
@@ -210,6 +270,14 @@ def parse_arguments() -> argparse.Namespace:
                         help="Override the adapter's extra observation planes. -1 keeps "
                              "whatever the adapter defines, 0 disables them entirely. Use 0 "
                              "to A/B a game's HUD planes against plain frames.")
+    parser.add_argument('--no_state_vector', action='store_true',
+                        default=config_defaults.get('no_state_vector', False),
+                        help="Drop the adapter's scalar branch (inventory, room "
+                             "coordinates, recent actions) and train on planes "
+                             "alone. The A/B against the default, and the way "
+                             "to load a checkpoint from before the branch "
+                             "existed. Changes the network input, so its "
+                             "checkpoints do not interchange with the default.")
     parser.add_argument('--input_size', type=int,
                         default=config_defaults.get('input_size', DEFAULT_INPUT_SIZE),
                         help='Square edge every frame is resized to (default 84). Larger '
@@ -226,13 +294,15 @@ def parse_arguments() -> argparse.Namespace:
     # log of a training run that is already in flight.
     parser.add_argument('--log_file', type=str, default='training_log.csv',
                         help='CSV to append per-episode stats to')
-    parser.add_argument('--n_steps', type=int, default=3,
+    parser.add_argument('--n_steps', type=int,
+                        default=config_defaults.get('n_steps', 3),
                         help='RainbowDQN n-step return length (default 3). Raising it '
                              'widens the gap between actions in the Bellman target, '
                              'which is the measured weak spot: the network discriminates '
                              'positions 13-16x more strongly than actions, so the argmax '
                              'rides on ~0.02 of advantage. Ignored by DQN/DoubleDQN.')
-    parser.add_argument('--frame_skip', type=int, default=FRAME_SKIP,
+    parser.add_argument('--frame_skip', type=int,
+                        default=config_defaults.get('frame_skip', FRAME_SKIP),
                         help=f'Emulated frames per decision (default {FRAME_SKIP}). Larger '
                              'means each action commits to more game time, which also '
                              'widens the advantage between actions. Edge-triggered '
@@ -344,12 +414,21 @@ def write_run_config(run_dir: str, args: argparse.Namespace, adapter: GameAdapte
         "action_size": action_size,
         "input_shape": list(input_shape(adapter, args.input_size)),
         "extra_planes": adapter.extra_planes,
+        "vector_size": vector_width(adapter, action_size),
+        "adapter_vector_size": adapter.vector_size,
+        "recent_actions": RECENT_ACTIONS,
         "frame_skip": args.frame_skip,
         "args": dict(vars(args)),
     }
-    rewards = getattr(sys.modules[adapter.__module__], "REWARD_VALUES", None)
+    module = sys.modules[adapter.__module__]
+    rewards = getattr(module, "REWARD_VALUES", None)
     if isinstance(rewards, dict):
         config["reward_values"] = rewards
+    # Item values live in their own constants rather than REWARD_VALUES, so a
+    # config.json carrying only the latter records half the reward table.
+    items = getattr(module, "REWARD_ITEMS", None)
+    if isinstance(items, dict):
+        config["reward_items"] = items
     with open(os.path.join(run_dir, "config.json"), "w") as f:
         json.dump(config, f, indent=2)
     return config
@@ -382,14 +461,21 @@ def append_run_index(run_dir: str, config: dict[str, Any],
         os.close(fd)
 
 def update_run_summary(run_dir: str, episode: int, episode_reward: float,
-                       best_reward: float, max_abs_q: float,
+                       score: float, best: "BestTracker", max_abs_q: float,
                        stats: dict[str, Any]) -> None:
-    """Rewrite this run's summary.json — cheap, and survives an interrupted run."""
+    """Rewrite this run's summary.json — cheap, and survives an interrupted run.
+
+    `best_episode` is recorded explicitly. Working out which policy best.keras
+    held used to mean matching its mtime against the episode checkpoints.
+    """
     summary = {
         "updated": datetime.datetime.now().isoformat(timespec="seconds"),
         "episodes_completed": episode + 1,
         "last_episode_reward": round(float(episode_reward), 3),
-        "best_episode_reward": round(float(best_reward), 3),
+        "last_score": round(float(score), 3),
+        "best_score_avg": round(best.best, 3) if best.best_episode is not None else None,
+        "best_episode": best.best_episode,
+        "best_window": best.window,
         "last_max_abs_q": float(max_abs_q),
         "last_stats": stats,
     }
@@ -484,8 +570,51 @@ DIVERGENCE_FACTOR = 5.0
 # rewards that outlive the novelty that justified them.
 INTRINSIC_WARN_RATIO = 20.0
 
-BASE_LOG_COLUMNS = ['episode', 'episode_reward', 'intrinsic_reward', 'moving_avg', 'avg_loss', 'max_q', 'epsilon',
-                    'frames', 'training_steps', 'replay_buffer_size']
+BASE_LOG_COLUMNS = ['episode', 'start_state', 'episode_reward', 'intrinsic_reward', 'moving_avg', 'score', 'score_avg',
+                    'avg_loss', 'max_q', 'epsilon', 'frames', 'training_steps', 'replay_buffer_size']
+
+# Episodes averaged before `best.keras` is allowed to change.
+#
+# Measured on a finished 500-episode level1 run, choosing the best checkpoint by
+# single-episode reward picked episode 29 (epsilon 0.76). Removing the decaying
+# tile term from the score was not enough by itself: kills cap at 5 per episode,
+# so the first lucky 5-kill episode (55, epsilon 0.60) wins every later tie. A
+# trailing mean over 10, 20 or 30 episodes lands on episodes 270-282 instead —
+# the actual peak, 4.1-4.4 kills per episode at epsilon 0.08. 20 is the middle.
+BEST_WINDOW = 20
+
+
+class BestTracker:
+    """Decides when `best.keras` should be refreshed.
+
+    Compares the trailing mean of the adapter's `checkpoint_score` over
+    `window` episodes, never a single episode. Nothing counts as best until the
+    window is full, so the first few episodes cannot claim the checkpoint by
+    being the only ones seen.
+    """
+
+    def __init__(self, window: int = BEST_WINDOW) -> None:
+        self.window = window
+        self.scores: deque[float] = deque(maxlen=window)
+        self.best = float('-inf')
+        self.best_episode: int | None = None
+
+    @property
+    def mean(self) -> float | None:
+        """Trailing mean, or None until `window` scores have been seen."""
+        if len(self.scores) < self.window:
+            return None
+        return sum(self.scores) / len(self.scores)
+
+    def update(self, episode: int, score: float) -> bool:
+        """Record one episode's score; True when the trailing mean is a new best."""
+        self.scores.append(score)
+        mean = self.mean
+        if mean is None or mean <= self.best:
+            return False
+        self.best = mean
+        self.best_episode = episode
+        return True
 
 def log_episode_stats(columns: list[str], values: dict[str, Any],
                       log_file: str = "training_log.csv") -> None:
@@ -600,6 +729,10 @@ def main() -> None:
                 "for the adapter's default."
             )
         adapter.extra_planes = args.extra_planes
+    # The scalar branch is opt-out in the same way the extra planes are, so an
+    # ablation against planes-only is one flag rather than an edited adapter.
+    if args.no_state_vector:
+        adapter.vector_size = 0
     env = integrate(adapter.integration_name, state_name, render=args.render)
     action_size = len(adapter.actions)
     log_columns = BASE_LOG_COLUMNS + list(adapter.log_fields) + ['timestamp']
@@ -620,9 +753,15 @@ def main() -> None:
     # than a DQNAgent subclass, so the union spells out what main.py drives.
     agent: DQNAgent | RainbowDQNAgent
     shape = input_shape(adapter, args.input_size)
+    vec_size = vector_width(adapter, action_size)
     if args.input_size != DEFAULT_INPUT_SIZE or adapter.extra_planes:
         print(f"Input shape: {shape}  ({STACK_FRAMES} stacked frames "
               f"+ {adapter.extra_planes} adapter plane(s))")
+    if vec_size:
+        print(f"State vector: {vec_size} ({adapter.vector_size} adapter scalars "
+              f"+ {RECENT_ACTIONS} x {action_size} recent actions)")
+    else:
+        print("State vector: disabled (planes only)")
     # With rewards clipped to +-c, no true Q-value can exceed c / (1 - gamma).
     # Handing that to the agent lets it clamp the Bellman target to it, which is
     # what actually stops runaway bootstrapping. 0 (clipping off) leaves the
@@ -635,15 +774,16 @@ def main() -> None:
     if args.model == 'DQN':
         agent = DQNAgent(shape, action_size, args.learning_rate,
                          args.discount_factor, args.epsilon, args.epsilon_decay, args.epsilon_min,
-                         q_limit=q_limit)
+                         q_limit=q_limit, vector_size=vec_size)
     elif args.model == 'DoubleDQN':
         agent = DoubleDQNAgent(shape, action_size, args.learning_rate,
                                args.discount_factor, args.epsilon, args.epsilon_decay, args.epsilon_min,
-                               q_limit=q_limit)
+                               q_limit=q_limit, vector_size=vec_size)
     elif args.model == 'RainbowDQN':
         agent = RainbowDQNAgent(shape, action_size, args.learning_rate,
                                 args.discount_factor, args.epsilon, args.epsilon_decay, args.epsilon_min,
-                                q_limit=q_limit, n_step=args.n_steps)
+                                q_limit=q_limit, n_step=args.n_steps,
+                                vector_size=vec_size)
     else:
         raise SystemExit(f"Unknown model {args.model!r}. Choose DQN, DoubleDQN, or RainbowDQN.")
 
@@ -690,8 +830,9 @@ def main() -> None:
             agent.epsilon = args.epsilon_min
         print(f"Loaded model. Resuming with epsilon: {agent.epsilon}")
 
-    # Track best performance for saving
-    best_reward = float('-inf')
+    # Track best performance for saving. See BestTracker for why this is a
+    # trailing mean of the adapter's checkpoint score, not the episode reward.
+    best = BestTracker()
     episode_rewards = []
 
     # Train the agent
@@ -710,8 +851,12 @@ def main() -> None:
         raw = obs[0] if isinstance(obs, tuple) else obs
         frame = preprocess_frame(obs, args.input_size)
         frame_stack = deque([frame] * STACK_FRAMES, maxlen=STACK_FRAMES)
+        # Action history, most recent first, cleared per episode so nothing
+        # bleeds across the reset. appendleft with maxlen drops the oldest.
+        recent_actions: deque = deque([None] * RECENT_ACTIONS, maxlen=RECENT_ACTIONS)
         state = get_stacked_state(frame_stack,
-                                  adapter.extra_observation(raw, args.input_size))
+                                  adapter.extra_observation(raw, args.input_size),
+                                  build_state_vector(adapter, recent_actions, action_size))
 
         # Initialize per-episode reward counter.
         episode_reward = 0.0
@@ -732,6 +877,12 @@ def main() -> None:
         while not done and frame_count < args.max_frames:
             action = agent.act(state)
             action_index = int(np.argmax(action))
+            # Record before stepping, so the action history in `next_state`
+            # describes the actions that led to it. `state` was built with the
+            # history as it stood before this decision, which is the ordering
+            # that keeps the vector a property of the state rather than a
+            # preview of the action about to be taken.
+            recent_actions.appendleft(action_index)
             reward = 0.0
 
             # Repeat the chosen action for FRAME_SKIP frames, accumulating every
@@ -789,7 +940,9 @@ def main() -> None:
             next_frame = preprocess_frame(obs, args.input_size)
             frame_stack.append(next_frame)
             next_state = get_stacked_state(frame_stack,
-                                           adapter.extra_observation(raw, args.input_size))
+                                           adapter.extra_observation(raw, args.input_size),
+                                           build_state_vector(adapter, recent_actions,
+                                                              action_size))
 
             if args.debug_frames and frame_count % args.debug_frames < args.frame_skip:
                 save_debug_frame(raw, next_state, run_dir, episode, frame_count)
@@ -825,10 +978,12 @@ def main() -> None:
                 #
                 # Still observed, so the states do decay if reached legitimately.
                 if not done:
-                    bonus = args.rnd_beta * rnd.bonus(next_state)
+                    # Planes only: RND is a conv net over the observation, and
+                    # its --rnd_planes selection indexes channels.
+                    bonus = args.rnd_beta * rnd.bonus(next_state.planes)
                     episode_intrinsic += bonus
                     train_reward += bonus
-                rnd.observe(next_state)
+                rnd.observe(next_state.planes)
 
             loss = agent.train(state, action, clip_reward(train_reward, args.reward_clip),
                                next_state, done,
@@ -851,6 +1006,9 @@ def main() -> None:
 
         # Game-specific episode metrics (e.g. kills/cleared for Zelda)
         stats = adapter.episode_stats()
+        # Comparable across episodes, unlike episode_reward when the adapter has
+        # a decaying term. is_best is decided below, after the divergence check.
+        score = adapter.checkpoint_score(episode_reward, stats)
 
         # Peak |Q| this episode, then reset for the next one. With clipped
         # rewards this should settle near reward_clip / (1 - discount_factor);
@@ -864,14 +1022,20 @@ def main() -> None:
 
         # Print progress every episode
         print(f"\n{'='*60}")
-        print(f"Episode {episode + 1}/{args.num_episodes} Complete")
+        print(f"Episode {episode + 1}/{args.num_episodes} Complete"
+              + (f"  [{adapter.state}]" if pool else ""))
         print(f"{'='*60}")
         print(f"Episode Reward: {episode_reward:.2f}")
         print(f"Moving Avg (last {window_size}): {moving_avg:.2f}")
         summary = adapter.summary_line()
         if summary:
             print(summary)
-        print(f"Avg Loss: {avg_loss:.4f}")
+        # 4 significant digits, not 4 decimal places. Huber sits in its
+        # quadratic region once rewards are small, so a healthy loss here is
+        # ~5e-05 and a fixed 4dp format printed a flat 0.0000 every episode --
+        # which silently retired a canary, since "avg_loss reading 0" is a
+        # documented symptom of the onset of Q divergence.
+        print(f"Avg Loss: {avg_loss:.4g}")
         if rnd is not None:
             print(f"Intrinsic: {episode_intrinsic:+.3f} (extrinsic {episode_reward:+.2f})")
             # Intrinsic reward is baked into the replay buffer at storage time,
@@ -895,8 +1059,13 @@ def main() -> None:
         if q_limit is not None and max_abs_q > q_limit * DIVERGENCE_FACTOR:
             print(f"\n*** DIVERGED: |Q| = {max_abs_q:.4g} exceeds {DIVERGENCE_FACTOR}x the "
                   f"q_limit of {q_limit:.1f}. Training is not recoverable from here.")
-            print(f"*** Best checkpoint kept at {run_dir}/checkpoints/best.keras "
-                  f"(reward {best_reward:+.2f}).")
+            if best.best_episode is not None:
+                print(f"*** Best checkpoint kept at {run_dir}/checkpoints/best.keras "
+                      f"(episode {best.best_episode}, {best.window}-episode score "
+                      f"{best.best:+.3f}).")
+            else:
+                print(f"*** No best checkpoint yet — fewer than {best.window} "
+                      "episodes completed. Periodic checkpoints are in checkpoints/.")
             print("*** Stopping. Lower --learning_rate or --reward_clip and resume from best.keras.")
             break
         print(f"Epsilon: {agent.epsilon:.4f}")
@@ -908,9 +1077,17 @@ def main() -> None:
         # Log stats to CSV (generic columns + the adapter's game-specific ones)
         values = {
             'episode': episode,
+            # With a --state pool this is the only record of which state the
+            # episode sampled. Without it, a key used from `level1_door` (Link
+            # placed at the door holding a key) looks identical in the log to
+            # one earned from the entrance.
+            'start_state': adapter.state,
             'episode_reward': f"{episode_reward:.2f}",
             'moving_avg': f"{moving_avg:.2f}",
-            'avg_loss': f"{avg_loss:.4f}",
+            'score': f"{score:.3f}",
+            # Filled in below once the tracker has seen this episode.
+            'score_avg': '',
+            'avg_loss': f"{avg_loss:.4g}",
             'intrinsic_reward': f"{episode_intrinsic:.4f}",
             'max_q': f"{max_abs_q:.4g}",
             'epsilon': f"{agent.epsilon:.4f}",
@@ -920,17 +1097,19 @@ def main() -> None:
             **stats,
             'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
+        is_best = best.update(episode, score)
+        if best.mean is not None:
+            values['score_avg'] = f"{best.mean:.3f}"
         log_episode_stats(log_columns, values, log_file=log_path)
 
-        # Save model if this is the best performance so far, or every 50 episodes
-        is_best = episode_reward > best_reward
+        # Save model if the trailing score is the best so far, or every 50 episodes
         if is_best or episode % 50 == 0:
             if is_best:
-                best_reward = episode_reward
-                print(f"New best reward: {best_reward:.2f} - Saving model!")
+                print(f"New best {best.window}-episode score: {best.best:+.3f} "
+                      f"(episode {episode}) - Saving model!")
             save_model(agent, episode, run_dir, is_best=is_best)
 
-        update_run_summary(run_dir, episode, episode_reward, best_reward, max_abs_q, stats)
+        update_run_summary(run_dir, episode, episode_reward, score, best, max_abs_q, stats)
 
 if __name__ == "__main__":
     main()

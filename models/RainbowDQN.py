@@ -5,9 +5,16 @@ from typing import Any
 import keras
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras.layers import Conv2D, Dense, Flatten, Input
+from tensorflow.keras.layers import Concatenate, Conv2D, Dense, Flatten, Input
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
+
+from models.observation import (
+    Observation,
+    as_tensors,
+    concat_inputs,
+    model_input,
+)
 
 # Ceiling on any single transition's priority.
 #
@@ -176,9 +183,12 @@ class RainbowDQNAgent:
     def __init__(self, input_shape: tuple[int, int, int], action_size: int,
                  learning_rate: float, discount_factor: float, epsilon: float,
                  epsilon_decay: float, epsilon_min: float,
-                 q_limit: float | None = None, n_step: int = 3) -> None:
+                 q_limit: float | None = None, n_step: int = 3,
+                 vector_size: int = 0) -> None:
         self.input_shape = input_shape  # (height, width, stacked_frames), e.g. (84, 84, 4)
         self.action_size = action_size
+        # Width of the adapter's scalar branch; 0 keeps the single-input network.
+        self.vector_size = vector_size
         self.learning_rate = learning_rate
         self.discount_factor = discount_factor
         self.epsilon = epsilon
@@ -234,8 +244,15 @@ class RainbowDQNAgent:
 
         Shared convolutional backbone → split into value and advantage streams:
             Q(s,a) = V(s) + A(s,a) - mean_a(A(s,a))
+
+        The adapter's state vector, when there is one, is concatenated onto the
+        flattened conv features so both streams see it. That matters most for
+        the advantage stream: the measured weak spot is that the network
+        discriminates positions far more strongly than actions, and inventory —
+        "do I hold a key" — is exactly the kind of fact that changes which
+        action is best without changing the pixels much.
         """
-        inp = Input(shape=self.input_shape)
+        inp = Input(shape=self.input_shape, name="planes")
         # Normalize uint8 frames [0, 255] → [0, 1] inside the model so that
         # states can be stored as uint8 in the replay buffer (4× less memory)
         # while Q-values stay in a numerically stable range during training.
@@ -244,6 +261,13 @@ class RainbowDQNAgent:
         x = Conv2D(64, (4, 4), strides=(2, 2), activation='relu')(x)
         x = Conv2D(64, (3, 3), activation='relu')(x)
         x = Flatten()(x)
+
+        inputs: Any = inp
+        if self.vector_size > 0:
+            vector_in = Input(shape=(self.vector_size,), name="vector")
+            x = Concatenate()([x, vector_in])
+            inputs = [inp, vector_in]
+
         x = Dense(512, activation='relu')(x)
 
         # Value stream: V(s)
@@ -258,7 +282,7 @@ class RainbowDQNAgent:
         # keras.ops.mean works on symbolic KerasTensors (Keras 3 / TF 2.18+)
         q = v + a - keras.ops.mean(a, axis=1, keepdims=True)
 
-        model = Model(inputs=inp, outputs=q)
+        model = Model(inputs=inputs, outputs=q)
         model.compile(
             loss=tf.keras.losses.Huber(delta=2.0),
             optimizer=Adam(learning_rate=self.learning_rate, clipnorm=1.0)
@@ -328,7 +352,7 @@ class RainbowDQNAgent:
     # Action selection
     # ------------------------------------------------------------------
 
-    def act(self, state: np.ndarray) -> np.ndarray:
+    def act(self, state: Observation) -> np.ndarray:
         """
         Epsilon-greedy action selection.
         Returns a one-hot encoded action vector (matches DQNAgent interface).
@@ -336,7 +360,8 @@ class RainbowDQNAgent:
         if np.random.rand() <= self.epsilon:
             action_index = np.random.randint(self.action_size)
         else:
-            q_values = self.model(state, training=False).numpy()
+            q_values = self.model(model_input([state], self.vector_size),
+                                  training=False).numpy()
             action_index = int(np.argmax(q_values[0]))
 
         action = np.zeros(self.action_size, dtype=int)
@@ -384,8 +409,8 @@ class RainbowDQNAgent:
     # Training
     # ------------------------------------------------------------------
 
-    def train(self, state: np.ndarray, action: np.ndarray | int, reward: float,
-              next_state: np.ndarray, done: bool, learn: bool = True) -> float | None:
+    def train(self, state: Observation, action: np.ndarray | int, reward: float,
+              next_state: Observation, done: bool, learn: bool = True) -> float | None:
         """
         Accumulate n-step transitions, then train from the prioritized buffer.
 
@@ -431,8 +456,8 @@ class RainbowDQNAgent:
         # Sample with importance-sampling weights
         batch, indices, is_weights = self.memory.sample(self.batch_size)
 
-        states = np.vstack([t[0] for t in batch])
-        next_states = np.vstack([t[3] for t in batch])
+        states = model_input([t[0] for t in batch], self.vector_size)
+        next_states = model_input([t[3] for t in batch], self.vector_size)
         actions = [t[1] for t in batch]
         rewards = np.array([t[2] for t in batch], dtype=np.float32)
         dones = np.array([t[4] for t in batch], dtype=np.float32)
@@ -444,7 +469,7 @@ class RainbowDQNAgent:
         # 2*batch_size instead of two of batch_size. The GPU is nowhere near
         # saturated at this size, so the larger call costs barely more than the
         # smaller one and saves an entire round trip.
-        combined = self.model(np.concatenate([states, next_states], axis=0),
+        combined = self.model(concat_inputs(states, next_states),
                               training=False).numpy()
         # Current Q-values (reference for building the full target vector) ...
         current_q = combined[:self.batch_size]
@@ -476,7 +501,7 @@ class RainbowDQNAgent:
         # One compiled gradient step; IS weights correct for the non-uniform
         # sampling distribution.
         loss = self._train_step(
-            tf.convert_to_tensor(states),
+            as_tensors(states),
             tf.convert_to_tensor(targets),
             tf.convert_to_tensor(is_weights),
         )

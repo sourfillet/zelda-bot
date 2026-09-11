@@ -1,7 +1,7 @@
 {
     "model": "RainbowDQN",
     "game": "Zelda",
-    "state": "level1",
+    "state": "level1,level1_key,level1_door,level1_room99",
     "num_episodes": 500,
     "learning_rate": 0.00025,
     "discount_factor": 0.997,
@@ -9,6 +9,7 @@
     "epsilon_decay": 0.9908,
     "epsilon_min": 0.05,
     "max_frames": 8000,
+    "frame_skip": 16,
     "input_size": 84,
     "extra_planes": -1
 }
