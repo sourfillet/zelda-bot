@@ -33,3 +33,10 @@ archive
 cuda-keyring_1.0-1_all.deb
 # Personal research log for ML/optimization decisions. Intentionally local-only.
 ML_NOTES.md
+
+# Training artifacts and media: generated, and not useful to anyone cloning the repo
+evals/
+*.avi
+*.mp4
+*.keras
+*.h5
